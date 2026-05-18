@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>stepper_control_pkg</name>
+  <version>0.1.0</version>
+  <description>
+    Paquete ROS 2 (Jazzy) para leer un sensor customizado y controlar un motor
+    paso a paso NEMA 17 con driver TB6600 en Raspberry Pi 5.
+  </description>
+
+  <maintainer email="maintainer@example.com">Maintainer Name</maintainer>
+  <license>Apache-2.0</license>
+
+  <!-- Herramientas de build -->
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <!-- Dependencias en runtime -->
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+
+  <!-- Dependencias de test -->
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

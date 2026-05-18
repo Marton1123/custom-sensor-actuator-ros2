@@ -1,0 +1,16 @@
+# Parámetros por defecto para stepper_control_pkg
+# Sobreescribibles desde la línea de comandos o en el launch file.
+
+nodo_sensores:
+  ros__parameters:
+    sample_rate: 10        # Hz — frecuencia de publicación de /estado_sensor
+    sensor_pin: 0          # Canal ADC o pin BCM del sensor
+
+nodo_actuadores:
+  ros__parameters:
+    pin_step: 17           # Pin BCM → STEP del TB6600
+    pin_dir: 27            # Pin BCM → DIR  del TB6600
+    pin_ena: 22            # Pin BCM → ENA  del TB6600
+    steps_rev: 200         # Pasos por revolución del NEMA 17 (full-step)
+    step_delay: 0.002      # Segundos entre pulsos STEP (controla la velocidad)
+    umbral: 50.0           # Valor del sensor a partir del cual se activa el motor
