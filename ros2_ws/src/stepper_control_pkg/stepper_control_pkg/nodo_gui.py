@@ -15,6 +15,8 @@ Publica en: /comando_grados (std_msgs/Float32)
 import sys
 import threading
 
+import cv2              # OpenCV — sudo apt install python3-opencv
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -235,7 +237,8 @@ class VentanaPrincipal(QMainWindow):
         self.setWindowTitle("Panel de Control — NEMA 17")
         # ── MODO KIOSCO: sin decoración de ventana del sistema operativo ──
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
-        self._build_ui()
+        self._build_ui()          # crea self._lbl_camara (necesario antes del timer)
+        self._init_camara()       # inicializa VideoCapture y QTimer
         self.showFullScreen()
 
     # ── Construcción de UI ────────────────────────────────────────────────
@@ -429,6 +432,76 @@ class VentanaPrincipal(QMainWindow):
                 f"border-bottom:3px solid {WIN95_WHITE}; border-right:3px solid {WIN95_WHITE};"
                 "padding:10px 20px; letter-spacing:2px;"
             )
+
+    # ── Cámara Logitech C270 (OpenCV) ───────────────────────────────────
+
+    def _init_camara(self) -> None:
+        """
+        Abre /dev/video0 (Logitech C270) y arranca el QTimer a ~30 ms (33 FPS).
+        Si la cámara no está disponible al inicio, el label mostrará SIN SEÑAL
+        y el timer seguirá intentando en cada tick.
+        """
+        self.captura = cv2.VideoCapture(0)   # índice 0 = /dev/video0
+
+        if not self.captura.isOpened():
+            self._lbl_camara.setText("🔴 SIN SEÑAL DE CÁMARA")
+            self._lbl_estado_sistema.setText("🔴 CÁMARA NO DETECTADA")
+        else:
+            self._lbl_estado_sistema.setText("🟢 SISTEMA ACTIVO")
+
+        # QTimer en hilo Qt — seguro para actualizar widgets
+        self._timer_camara = QTimer(self)
+        self._timer_camara.timeout.connect(self._actualizar_frame)
+        self._timer_camara.start(30)   # 30 ms ≈ 33 FPS
+
+    def _actualizar_frame(self) -> None:
+        """
+        Llamado cada 30 ms por el QTimer.
+        Lee un frame de la cámara, lo convierte a QPixmap y lo muestra en lbl_camara.
+        Si la captura falla, muestra el aviso de sin señal.
+        """
+        if not self.captura.isOpened():
+            self._lbl_camara.clear()
+            self._lbl_camara.setText("🔴 SIN SEÑAL DE CÁMARA")
+            return
+
+        ret, frame = self.captura.read()
+
+        if not ret or frame is None:
+            self._lbl_camara.clear()
+            self._lbl_camara.setText("🔴 SIN SEÑAL DE CÁMARA")
+            return
+
+        # BGR (OpenCV) → RGB (Qt)
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch  = frame_rgb.shape
+        bytes_ln  = ch * w
+
+        # ndarray → QImage → QPixmap
+        img    = QImage(frame_rgb.data, w, h, bytes_ln, QImage.Format.Format_RGB888)
+        pixmap = QPixmap.fromImage(img)
+
+        # Escala manteniendo relación de aspecto al tamaño actual del label
+        self._lbl_camara.setPixmap(
+            pixmap.scaled(
+                self._lbl_camara.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+
+    # ── Limpieza ───────────────────────────────────────────────────────────
+
+    def closeEvent(self, event) -> None:
+        """
+        Llamado por Qt al cerrar la ventana (ej. desde QApplication.quit()).
+        Detiene el timer y libera el puerto USB de la cámara.
+        """
+        if hasattr(self, '_timer_camara') and self._timer_camara.isActive():
+            self._timer_camara.stop()
+        if hasattr(self, 'captura') and self.captura.isOpened():
+            self.captura.release()
+        super().closeEvent(event)
 
     def keyPressEvent(self, event) -> None:
         """Modo kiosco: no se cierra con ninguna tecla."""
