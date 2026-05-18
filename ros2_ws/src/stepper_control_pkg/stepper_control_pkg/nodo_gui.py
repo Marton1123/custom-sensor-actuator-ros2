@@ -20,13 +20,13 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from std_msgs.msg import Float32
 
+from PyQt6.QtCore import Qt, QSize, QTimer
+from PyQt6.QtGui import QFont, QPixmap, QImage
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout, QGridLayout,
-    QPushButton, QLabel, QFrame, QGroupBox,
+    QPushButton, QLabel, QFrame, QGroupBox, QSizePolicy,
 )
-from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QFont
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -271,13 +271,14 @@ class VentanaPrincipal(QMainWindow):
         # 3d. Botón PARO DE EMERGENCIA
         content_layout.addWidget(self._make_stop_button(), stretch=1)
 
-        main_layout.addWidget(content)
+        main_layout.addWidget(content, stretch=1)  # stretch=1 → rellena el resto de pantalla
 
     # ── Barra de título (modo kiosco — sin botón cerrar) ─────────────────
 
     def _make_titlebar(self) -> QWidget:
         """
         Barra de título decorativa estilo Win95 (azul marino).
+        Incluye un indicador de estado dinámico a la derecha.
         No tiene botón de cierre — modo kiosco.
         """
         bar = QWidget()
@@ -286,42 +287,57 @@ class VentanaPrincipal(QMainWindow):
 
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(14, 0, 14, 0)
+        layout.setSpacing(10)
 
         icon = QLabel("■")
         icon.setStyleSheet("color: #AAAAFF; font-size: 14px; background: transparent;")
 
-        title = QLabel("PANEL DE CONTROL  —  ACTUADOR NEMA 17  |  TB6600  |  RPi5")
+        title = QLabel("PANEL DE CONTROL  —  ACTUADOR NEMA 17")
         title.setObjectName("lbl_titlebar")
         title.setAlignment(
-            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+        )
+
+        # ── Indicador de estado dinámico ────────────────────────────────
+        # Actualizable en tiempo de ejecución con self._lbl_estado_sistema.setText()
+        self._lbl_estado_sistema = QLabel("🟢 SISTEMA ACTIVO")
+        self._lbl_estado_sistema.setStyleSheet(
+            "color: #00FF88; font-size: 13px; font-weight: bold;"
+            "font-family: 'Courier New', monospace; background: transparent;"
+            "padding-right: 6px;"
+        )
+        self._lbl_estado_sistema.setAlignment(
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight
         )
 
         layout.addWidget(icon)
         layout.addWidget(title, stretch=1)
+        layout.addWidget(self._lbl_estado_sistema)
         return bar
 
     # ── Placeholder cámara ──────────────────────────────────────────────
 
     def _make_camera_placeholder(self) -> QLabel:
         """
-        Marco negro con texto verde oscuro que simula un feed de cámara apagado.
-        Altura fija 200 px para la orientación vertical 480×800.
-
-        Para conectar el video real (ej. con OpenCV + QImage):
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w, ch = frame.shape
-            img = QImage(frame.data, w, h, ch * w, QImage.Format.Format_RGB888)
-            self._lbl_camara.setPixmap(QPixmap.fromImage(img))
+        Marco negro que ocupa todo el espacio disponible verticalmente.
+        Expanding en ambos ejes → se estira para rellenar la pantalla.
+        Cuando OpenCV esté disponible (Paso 3), se usará setPixmap() en lugar de setText().
         """
         lbl = QLabel()
         lbl.setObjectName("lbl_camara")
-        lbl.setFixedHeight(200)
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl.setText(
             "██  CÁMARA DE DETECCIÓN  ██\n\n"
             "[ SIN SEÑAL ]\n\n"
             "Ch.01  480×800  LIVE"
         )
+        # Expanding en ambos ejes → rellena el espacio sobrante
+        lbl.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        lbl.setMinimumHeight(120)   # mínimo de seguridad
+        self._lbl_camara = lbl      # referencia para actualizar desde el timer
         return lbl
 
     # ── Display LCD (ancho completo) ────────────────────────────────────
@@ -339,8 +355,12 @@ class VentanaPrincipal(QMainWindow):
     # ── GroupBox de control ───────────────────────────────────────────────
 
     def _make_control_group(self) -> QGroupBox:
-        """Grid 2×2 de botones táctiles optimizado para pantalla vertical 480px."""
+        """Grid 2×2 de botones táctiles. Expanding vertical → crece con la pantalla."""
         group = QGroupBox(" CONTROL DE MOVIMIENTO ")
+        group.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
         grid = QGridLayout(group)
         grid.setSpacing(10)
         grid.setContentsMargins(10, 14, 10, 10)
@@ -354,11 +374,10 @@ class VentanaPrincipal(QMainWindow):
 
         for texto, grados, fila, col in botones:
             btn = QPushButton(texto)
-            # En 480 px de ancho con 2 columnas y márgenes: ~220 px c/u
             btn.setMinimumSize(QSize(180, 100))
             btn.setSizePolicy(
-                btn.sizePolicy().horizontalPolicy(),
-                btn.sizePolicy().verticalPolicy(),
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Expanding,
             )
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _, g=grados: self._enviar(g))
