@@ -2,95 +2,101 @@
 """
 nodo_actuadores.py
 ==================
-Nodo ROS 2 (Jazzy Jalisco) que se suscribe a /estado_sensor (y opcionalmente
-a /control_manual) y acciona un motor paso a paso NEMA 17 mediante un driver
-TB6600 usando los pines GPIO de la Raspberry Pi 5.
+Nodo ROS 2 (Jazzy Jalisco) que controla un motor paso a paso NEMA 17 mediante
+el driver TB6600, usando lgpio para generar el tren de pulsos en la RPi5.
+
+Suscripciones:
+    /estado_sensor  (std_msgs/Float32) : 1.0 → girar | 0.0 → detener
+    /control_manual (std_msgs/Bool)    : True → girar | False → detener
+
+Pinout TB6600 → Raspberry Pi 5 (BCM, configurables por parámetros):
+    PUL+ (STEP) → GPIO 17
+    DIR+        → GPIO 27
 
 Hardware target : Raspberry Pi 5 — Ubuntu 24.04
-Driver          : TB6600 (Step / Direction / Enable)
+Librería GPIO   : lgpio  (sudo apt install python3-lgpio)
 
-Pinout TB6600 → RPi5 (BCM por defecto, ajustable por parámetros):
-    STEP  → GPIO 17  (BCM)
-    DIR   → GPIO 27  (BCM)
-    ENA   → GPIO 22  (BCM)  [LOW = habilitado en TB6600]
+NOTA IMPORTANTE — gpiochip en RPi5:
+    En Raspberry Pi 5 con Ubuntu 24.04, el GPIO principal está en
+    /dev/gpiochip4, NO en gpiochip0 como en los modelos anteriores.
+    El parámetro 'gpio_chip' (default=4) permite ajustarlo sin tocar el código.
 
-Dependencias del sistema:
-    sudo apt install python3-rclpy ros-jazzy-std-msgs
-    pip3 install lgpio   # librería recomendada para RPi5 (reemplaza RPi.GPIO)
+Estrategia de generación de pulsos:
+    Se usa lgpio.tx_pwm() — función no bloqueante que delega el tren de pulsos
+    a un hilo interno de lgpio. Esto libera el hilo ROS 2 para seguir procesando
+    mensajes mientras el motor gira de forma continua.
+
+    Frecuencia de paso por defecto: 400 Hz → 2 rev/s con NEMA 17 full-step (200 p/rev).
+    Ajusta 'step_freq' para cambiar la velocidad sin recompilar.
 """
 
-import time
 import threading
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
-from std_msgs.msg import Float32, Bool  # Bool para /control_manual (ejemplo)
+from std_msgs.msg import Float32, Bool
 
-# ---------------------------------------------------------------------------
-# TODO (GPIO): importar la librería de bajo nivel para los GPIO
-# Opción recomendada en RPi5 con Ubuntu 24.04:
-#   import lgpio
-# Alternativa con gpiozero (backend lgpio):
-#   from gpiozero import OutputDevice
-# ---------------------------------------------------------------------------
+try:
+    import lgpio
+    _LGPIO_DISPONIBLE = True
+except ImportError:
+    _LGPIO_DISPONIBLE = False
 
 
-# ── Constantes del driver TB6600 ──────────────────────────────────────────
-_STEP_PULSE_WIDTH_S: float = 2e-6   # 2 µs mínimo según datasheet TB6600
-_ENA_SETTLE_S: float = 0.005        # 5 ms de espera tras habilitar el driver
+# ── Valores de referencia del TB6600 ─────────────────────────────────────
+_DIR_CW:  int = 1   # DIR+ HIGH → giro horario
+_DIR_CCW: int = 0   # DIR+ LOW  → giro antihorario
+_PWM_DUTY_CYCLE: float = 50.0   # 50 % — pulso cuadrado estándar para step drivers
+
+# Umbral de comparación: si el valor Float32 >= este valor → girar
+_UMBRAL_ACTIVO: float = 0.5
 
 
 class NodoActuadores(Node):
     """
-    Nodo suscriptor que controla un motor NEMA 17 a través del driver TB6600.
-
-    Suscripciones:
-        /estado_sensor   (std_msgs/Float32) : valor del sensor que dispara el movimiento
-        /control_manual  (std_msgs/Bool)    : override manual (True = paso adelante)
+    Nodo suscriptor que controla un NEMA 17 via TB6600 con lgpio.
 
     Parámetros ROS 2:
-        pin_step     (int)   : pin STEP del TB6600   [default: 17]
-        pin_dir      (int)   : pin DIR del TB6600    [default: 27]
-        pin_ena      (int)   : pin ENA del TB6600    [default: 22]
-        steps_rev    (int)   : pasos por revolución  [default: 200]
-        step_delay   (float) : retardo entre pasos (s) [default: 0.002]
-        umbral       (float) : umbral del sensor para activar el motor [default: 50.0]
+        gpio_chip   (int)   : índice del chip GPIO (/dev/gpiochipN) [default: 4]
+        pin_step    (int)   : pin STEP (PUL+) del TB6600            [default: 17]
+        pin_dir     (int)   : pin DIR+  del TB6600                  [default: 27]
+        step_freq   (float) : frecuencia del tren de pulsos (Hz)    [default: 400.0]
+        dir_horario (bool)  : True=CW, False=CCW                    [default: True]
     """
 
-    TOPIC_ESTADO_SENSOR = "/estado_sensor"
+    TOPIC_ESTADO_SENSOR  = "/estado_sensor"
     TOPIC_CONTROL_MANUAL = "/control_manual"
 
     def __init__(self) -> None:
         super().__init__("nodo_actuadores")
 
-        # ── Parámetros configurables ───────────────────────────────────────
-        self.declare_parameter("pin_step",   17)
-        self.declare_parameter("pin_dir",    27)
-        self.declare_parameter("pin_ena",    22)
-        self.declare_parameter("steps_rev",  200)
-        self.declare_parameter("step_delay", 0.002)
-        self.declare_parameter("umbral",     50.0)
+        # ── Parámetros ─────────────────────────────────────────────────────
+        self.declare_parameter("gpio_chip",   4)
+        self.declare_parameter("pin_step",    17)
+        self.declare_parameter("pin_dir",     27)
+        self.declare_parameter("step_freq",   400.0)
+        self.declare_parameter("dir_horario", True)
 
-        self._pin_step:   int   = self.get_parameter("pin_step").get_parameter_value().integer_value
-        self._pin_dir:    int   = self.get_parameter("pin_dir").get_parameter_value().integer_value
-        self._pin_ena:    int   = self.get_parameter("pin_ena").get_parameter_value().integer_value
-        self._steps_rev:  int   = self.get_parameter("steps_rev").get_parameter_value().integer_value
-        self._step_delay: float = self.get_parameter("step_delay").get_parameter_value().double_value
-        self._umbral:     float = self.get_parameter("umbral").get_parameter_value().double_value
+        self._gpio_chip:   int   = self.get_parameter("gpio_chip").get_parameter_value().integer_value
+        self._pin_step:    int   = self.get_parameter("pin_step").get_parameter_value().integer_value
+        self._pin_dir:     int   = self.get_parameter("pin_dir").get_parameter_value().integer_value
+        self._step_freq:   float = self.get_parameter("step_freq").get_parameter_value().double_value
+        self._dir_horario: bool  = self.get_parameter("dir_horario").get_parameter_value().bool_value
 
         # ── Estado interno ─────────────────────────────────────────────────
-        self._motor_activo: bool = False
-        self._lock = threading.Lock()  # protege acceso a GPIO desde callbacks
+        self._motor_girando: bool = False
+        self._gpio_handle = None
+        self._lock = threading.Lock()  # serializa acceso a GPIO desde callbacks
 
         # ── QoS ───────────────────────────────────────────────────────────
-        qos_sensor = QoSProfile(
+        qos_be = QoSProfile(  # Best-effort para sensor
             depth=10,
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )
-        qos_control = QoSProfile(
+        qos_rel = QoSProfile(  # Reliable para control manual
             depth=5,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
@@ -101,199 +107,203 @@ class NodoActuadores(Node):
             Float32,
             self.TOPIC_ESTADO_SENSOR,
             self._cb_estado_sensor,
-            qos_sensor,
+            qos_be,
         )
-
         self._sub_manual = self.create_subscription(
             Bool,
             self.TOPIC_CONTROL_MANUAL,
             self._cb_control_manual,
-            qos_control,
+            qos_rel,
         )
 
-        # ── Inicialización del hardware GPIO ───────────────────────────────
+        # ── Inicialización GPIO ────────────────────────────────────────────
         self._init_gpio()
 
         self.get_logger().info(
-            f"NodoActuadores iniciado | STEP={self._pin_step} DIR={self._pin_dir} "
-            f"ENA={self._pin_ena} | umbral={self._umbral}"
+            f"NodoActuadores iniciado | chip=gpiochip{self._gpio_chip} "
+            f"STEP=GPIO{self._pin_step} DIR=GPIO{self._pin_dir} "
+            f"freq={self._step_freq:.0f} Hz "
+            f"| lgpio={'OK' if _LGPIO_DISPONIBLE else 'NO DISPONIBLE — modo log'}"
         )
 
-    # ------------------------------------------------------------------
-    # Inicialización GPIO
-    # ------------------------------------------------------------------
+    # ══════════════════════════════════════════════════════════════════════
+    # Inicialización y teardown GPIO
+    # ══════════════════════════════════════════════════════════════════════
+
     def _init_gpio(self) -> None:
         """
-        Configura los pines GPIO para el driver TB6600.
+        Abre el chip GPIO y reclama los pines STEP y DIR como salidas.
 
-        TODO (GPIO): Reemplaza el bloque de simulación con código real.
-
-        — Usando lgpio (recomendado para RPi5):
-
-            self._h = lgpio.gpiochip_open(0)          # abre /dev/gpiochip0
-            lgpio.gpio_claim_output(self._h, self._pin_step)
-            lgpio.gpio_claim_output(self._h, self._pin_dir)
-            lgpio.gpio_claim_output(self._h, self._pin_ena)
-            lgpio.gpio_write(self._h, self._pin_ena, 1)  # deshabilitado al inicio
-            lgpio.gpio_write(self._h, self._pin_dir, 0)  # dirección CW
-
-        — Usando gpiozero (backend lgpio):
-
-            from gpiozero import OutputDevice
-            self._step_pin = OutputDevice(self._pin_step, active_high=True, initial_value=False)
-            self._dir_pin  = OutputDevice(self._pin_dir,  active_high=True, initial_value=False)
-            self._ena_pin  = OutputDevice(self._pin_ena,  active_high=False, initial_value=True)
+        Si lgpio no está instalado, el nodo funciona en modo "solo log"
+        para poder probar la lógica ROS 2 sin hardware.
         """
-        self._gpio_handle = None  # eliminar cuando se implemente el driver real
-        self.get_logger().warning(
-            "GPIO AÚN NO inicializado — modo simulación activo (sin movimiento real)."
-        )
+        if not _LGPIO_DISPONIBLE:
+            self.get_logger().warning(
+                "lgpio no disponible — ejecutando en MODO LOG (sin GPIO real). "
+                "Instala con: sudo apt install python3-lgpio"
+            )
+            return
 
-    # ------------------------------------------------------------------
-    # Control del motor: habilitar / deshabilitar
-    # ------------------------------------------------------------------
-    def _habilitar_motor(self, habilitar: bool) -> None:
+        try:
+            # Abre /dev/gpiochipN (N=4 en RPi5 con Ubuntu 24.04)
+            self._gpio_handle = lgpio.gpiochip_open(self._gpio_chip)
+
+            # Reclama los pines como salidas digitales, nivel inicial LOW
+            lgpio.gpio_claim_output(self._gpio_handle, self._pin_step, 0)
+            lgpio.gpio_claim_output(self._gpio_handle, self._pin_dir,  0)
+
+            # Establece la dirección de giro inicial
+            dir_nivel = _DIR_CW if self._dir_horario else _DIR_CCW
+            lgpio.gpio_write(self._gpio_handle, self._pin_dir, dir_nivel)
+
+            self.get_logger().info(
+                f"GPIO inicializado: chip=gpiochip{self._gpio_chip} | "
+                f"STEP→GPIO{self._pin_step} | DIR→GPIO{self._pin_dir} "
+                f"({'CW' if self._dir_horario else 'CCW'})"
+            )
+
+        except Exception as exc:
+            self._gpio_handle = None
+            self.get_logger().error(
+                f"Error al inicializar GPIO: {exc}. "
+                "Verifica que lgpio esté instalado y que tengas permisos "
+                "(añade tu usuario al grupo 'gpio': sudo usermod -aG gpio $USER)."
+            )
+
+    def _cerrar_gpio(self) -> None:
+        """Detiene el PWM y cierra el handle del chip GPIO."""
+        if self._gpio_handle is None:
+            return
+        try:
+            # Detiene cualquier tren de pulsos activo
+            lgpio.tx_pwm(self._gpio_handle, self._pin_step, 0, 0)
+            lgpio.gpiochip_close(self._gpio_handle)
+            self._gpio_handle = None
+            self.get_logger().info("GPIO liberado correctamente.")
+        except Exception as exc:
+            self.get_logger().error(f"Error al cerrar GPIO: {exc}")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Control del motor
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _iniciar_giro(self) -> None:
         """
-        Activa o desactiva la salida del driver TB6600 mediante el pin ENA.
+        Inicia el tren de pulsos continuo en el pin STEP usando lgpio.tx_pwm().
 
-        En TB6600: ENA en LOW → driver habilitado / ENA en HIGH → deshabilitado.
+        lgpio.tx_pwm(handle, gpio, frecuencia_Hz, ciclo_trabajo_%, offset=0, count=0)
+            - count=0  → pulsos infinitos hasta llamar a _detener_giro()
+            - ciclo    → 50 % genera pulso cuadrado simétrico
 
-        TODO (GPIO):
-            nivel = 0 if habilitar else 1
-            lgpio.gpio_write(self._h, self._pin_ena, nivel)  # lgpio
-            # O:
-            self._ena_pin.on() if habilitar else self._ena_pin.off()  # gpiozero
+        Esta llamada es NO BLOQUEANTE: lgpio maneja el PWM en background,
+        liberando el hilo ROS 2 para seguir procesando mensajes.
         """
-        estado = "HABILITADO" if habilitar else "DESHABILITADO"
-        self.get_logger().info(f"Motor TB6600: {estado} (simulado)")
-        if habilitar:
-            time.sleep(_ENA_SETTLE_S)
+        if self._gpio_handle is None:
+            self.get_logger().info(
+                f"[MODO LOG] Motor INICIADO — freq={self._step_freq:.0f} Hz "
+                f"({'CW' if self._dir_horario else 'CCW'})"
+            )
+            return
 
-    # ------------------------------------------------------------------
-    # Control del motor: dirección
-    # ------------------------------------------------------------------
-    def _set_direccion(self, horario: bool) -> None:
+        try:
+            # Actualiza dirección antes de arrancar
+            dir_nivel = _DIR_CW if self._dir_horario else _DIR_CCW
+            lgpio.gpio_write(self._gpio_handle, self._pin_dir, dir_nivel)
+
+            # Arranca el tren de pulsos (non-blocking)
+            lgpio.tx_pwm(
+                self._gpio_handle,
+                self._pin_step,
+                self._step_freq,    # Hz
+                _PWM_DUTY_CYCLE,    # %
+                0,                  # offset µs
+                0,                  # count=0 → infinito
+            )
+            self.get_logger().info(
+                f"Motor GIRANDO | freq={self._step_freq:.0f} Hz "
+                f"≈ {self._step_freq / 200:.1f} rev/s (full-step, 200 p/rev)"
+            )
+        except Exception as exc:
+            self.get_logger().error(f"Error al iniciar PWM: {exc}")
+
+    def _detener_giro(self) -> None:
         """
-        Establece la dirección de giro.
+        Detiene el tren de pulsos y deja el pin STEP en LOW.
 
-        horario=True  → CW (DIR = HIGH)
-        horario=False → CCW (DIR = LOW)
-
-        TODO (GPIO):
-            lgpio.gpio_write(self._h, self._pin_dir, 1 if horario else 0)  # lgpio
-            # O:
-            self._dir_pin.on() if horario else self._dir_pin.off()         # gpiozero
+        Pasando frecuencia=0 y duty=0 a tx_pwm se cancela la transacción activa.
         """
-        dir_str = "CW (horario)" if horario else "CCW (antihorario)"
-        self.get_logger().debug(f"Dirección: {dir_str} (simulado)")
+        if self._gpio_handle is None:
+            self.get_logger().info("[MODO LOG] Motor DETENIDO")
+            return
 
-    # ------------------------------------------------------------------
-    # Control del motor: enviar pasos
-    # ------------------------------------------------------------------
-    def _mover_pasos(self, n_pasos: int, horario: bool = True) -> None:
-        """
-        Envía `n_pasos` pulsos al driver TB6600.
+        try:
+            # Frecuencia 0 cancela el PWM en lgpio
+            lgpio.tx_pwm(self._gpio_handle, self._pin_step, 0, 0)
+            # Asegura que el pin quede en LOW (el TB6600 no interpreta un nivel fijo como paso)
+            lgpio.gpio_write(self._gpio_handle, self._pin_step, 0)
+            self.get_logger().info("Motor DETENIDO | STEP pin → LOW")
+        except Exception as exc:
+            self.get_logger().error(f"Error al detener PWM: {exc}")
 
-        Cada pulso consiste en:
-            1. STEP → HIGH
-            2. Espera `_STEP_PULSE_WIDTH_S`
-            3. STEP → LOW
-            4. Espera `self._step_delay` (controla la velocidad)
+    # ══════════════════════════════════════════════════════════════════════
+    # Callbacks de suscripción
+    # ══════════════════════════════════════════════════════════════════════
 
-        TODO (GPIO): Reemplaza el bloque de simulación con código real:
-
-            for _ in range(n_pasos):
-                lgpio.gpio_write(self._h, self._pin_step, 1)
-                time.sleep(_STEP_PULSE_WIDTH_S)
-                lgpio.gpio_write(self._h, self._pin_step, 0)
-                time.sleep(self._step_delay - _STEP_PULSE_WIDTH_S)
-        """
-        self.get_logger().info(
-            f"Moviendo {n_pasos} pasos {'CW' if horario else 'CCW'} "
-            f"a {self._step_delay*1000:.1f} ms/paso [SIMULADO]"
-        )
-        # -- simulación de tiempo de movimiento --
-        tiempo_total = n_pasos * self._step_delay
-        time.sleep(min(tiempo_total, 0.5))  # máximo 500 ms en simulación
-
-    # ------------------------------------------------------------------
-    # Callback: /estado_sensor
-    # ------------------------------------------------------------------
     def _cb_estado_sensor(self, msg: Float32) -> None:
         """
-        Lógica de control automático basada en el valor del sensor.
+        Reacciona al valor publicado por nodo_sensores.
 
-        Si el valor supera el umbral → activa el motor CW.
-        Si está por debajo        → detiene / desactiva el motor.
+        valor >= 0.5  (≡ 1.0) → girar de forma continua
+        valor <  0.5  (≡ 0.0) → detener el motor
+
+        El _lock evita condiciones de carrera si /control_manual llega
+        simultáneamente desde otro hilo del ejecutor.
         """
         valor = msg.data
-        self.get_logger().debug(f"estado_sensor recibido: {valor:.3f}")
+        self.get_logger().debug(f"/estado_sensor recibido: {valor:.1f}")
 
         with self._lock:
-            if valor >= self._umbral:
-                if not self._motor_activo:
-                    self._motor_activo = True
-                    self._habilitar_motor(True)
-                    self._set_direccion(horario=True)
-                    self.get_logger().info(
-                        f"Umbral superado ({valor:.2f} >= {self._umbral}): "
-                        "motor ACTIVADO."
-                    )
-
-                # TODO: definir cuántos pasos dar por ciclo de control
-                pasos_por_ciclo = 10
-                self._mover_pasos(pasos_por_ciclo, horario=True)
-
+            if valor >= _UMBRAL_ACTIVO:
+                if not self._motor_girando:
+                    self._motor_girando = True
+                    self._iniciar_giro()
             else:
-                if self._motor_activo:
-                    self._motor_activo = False
-                    self._habilitar_motor(False)
-                    self.get_logger().info(
-                        f"Valor bajo umbral ({valor:.2f} < {self._umbral}): "
-                        "motor DETENIDO."
-                    )
+                if self._motor_girando:
+                    self._motor_girando = False
+                    self._detener_giro()
 
-    # ------------------------------------------------------------------
-    # Callback: /control_manual
-    # ------------------------------------------------------------------
     def _cb_control_manual(self, msg: Bool) -> None:
         """
-        Override manual del motor.
+        Override manual: permite controlar el motor desde la terminal sin
+        necesidad del tópico del sensor.
 
-        True  → un paso en dirección CW.
-        False → deshabilita el motor.
-
-        TODO: Ampliar con velocidad y dirección si se usa un msg más rico.
+        Uso desde terminal:
+            ros2 topic pub /control_manual std_msgs/msg/Bool "data: true"  --once
+            ros2 topic pub /control_manual std_msgs/msg/Bool "data: false" --once
         """
-        self.get_logger().info(f"Control manual recibido: {msg.data}")
+        self.get_logger().info(f"/control_manual recibido: {msg.data}")
         with self._lock:
             if msg.data:
-                self._habilitar_motor(True)
-                self._set_direccion(horario=True)
-                self._mover_pasos(1, horario=True)
+                if not self._motor_girando:
+                    self._motor_girando = True
+                    self._iniciar_giro()
             else:
-                self._habilitar_motor(False)
-                self._motor_activo = False
+                if self._motor_girando:
+                    self._motor_girando = False
+                    self._detener_giro()
 
-    # ------------------------------------------------------------------
-    # Limpieza al apagar el nodo
-    # ------------------------------------------------------------------
+    # ══════════════════════════════════════════════════════════════════════
+    # Ciclo de vida
+    # ══════════════════════════════════════════════════════════════════════
+
     def destroy_node(self) -> None:
-        """
-        Asegura que el motor quede deshabilitado y los GPIO liberados.
-
-        TODO (GPIO):
-            self._habilitar_motor(False)
-            lgpio.gpiochip_close(self._h)   # lgpio
-            # O:
-            self._step_pin.close()          # gpiozero
-            self._dir_pin.close()
-            self._ena_pin.close()
-        """
-        self.get_logger().info(
-            "NodoActuadores: deshabilitando motor y liberando GPIO."
-        )
-        self._habilitar_motor(False)
+        """Detiene el motor y libera GPIO antes de destruir el nodo."""
+        self.get_logger().info("NodoActuadores: apagando nodo — deteniendo motor.")
+        with self._lock:
+            if self._motor_girando:
+                self._detener_giro()
+                self._motor_girando = False
+        self._cerrar_gpio()
         super().destroy_node()
 
 

@@ -2,42 +2,41 @@
 """
 nodo_sensores.py
 ================
-Nodo ROS 2 (Jazzy Jalisco) que lee datos de un sensor analógico/digital
-customizado y publica el estado en el tópico /estado_sensor.
+Nodo ROS 2 (Jazzy Jalisco) que simula un sensor publicando datos dummy en el
+tópico /estado_sensor (std_msgs/Float32).
+
+Comportamiento del dato dummy:
+    • Publica 1.0 durante FASE_ALTA_S segundos.
+    • Publica 0.0 durante FASE_BAJA_S segundos.
+    • Ciclo infinito.
 
 Hardware target : Raspberry Pi 5 — Ubuntu 24.04
-Driver de sensor : a definir (ADS1115, MCP3008, GPIO directo, etc.)
+Dependencias    : ros-jazzy-std-msgs, python3-rclpy
 
-Dependencias del sistema (instalar en la RPi5):
-    sudo apt install python3-rclpy ros-jazzy-std-msgs
-    pip3 install gpiozero  # o lgpio / RPi.GPIO según el driver elegido
+Cuando dispongas del sensor físico, reemplaza _read_sensor() con la lectura real
+y elimina las referencias a _inicio_fase / _en_fase_alta.
 """
+
+import time
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
-# Mensaje estándar para publicar el estado del sensor.
-# Cambia a un msg customizado si necesitas más campos (ej. Float32MultiArray).
 from std_msgs.msg import Float32
 
-# ---------------------------------------------------------------------------
-# TODO (GPIO / sensor): importar la librería de bajo nivel para tu sensor
-# Ejemplo con gpiozero + ADS1115 (I²C):
-#   from gpiozero import MCP3008
-# Ejemplo con Adafruit CircuitPython ADS1x15:
-#   import board, busio, adafruit_ads1x15.ads1115 as ADS
-#   from adafruit_ads1x15.analog_in import AnalogIn
-# ---------------------------------------------------------------------------
+
+# ── Duración de cada fase del ciclo dummy ─────────────────────────────────
+FASE_ALTA_S: float = 5.0   # segundos en que se publica 1.0
+FASE_BAJA_S: float = 5.0   # segundos en que se publica 0.0
 
 
 class NodoSensores(Node):
     """
-    Nodo publicador que lee un sensor y publica el valor en /estado_sensor.
+    Nodo publicador de /estado_sensor.
 
-    Parámetros ROS 2 (declarados en __init__):
-        sample_rate  (int)   : Frecuencia de muestreo en Hz  [default: 10]
-        sensor_pin   (int)   : Pin BCM o canal analógico      [default: 0]
+    Parámetros ROS 2:
+        sample_rate  (int)   : Frecuencia de publicación en Hz  [default: 10]
     """
 
     TOPIC_ESTADO_SENSOR = "/estado_sensor"
@@ -45,18 +44,17 @@ class NodoSensores(Node):
     def __init__(self) -> None:
         super().__init__("nodo_sensores")
 
-        # ── Parámetros configurables desde la línea de comandos / launch ──
-        self.declare_parameter("sample_rate", 10)   # Hz
-        self.declare_parameter("sensor_pin", 0)     # Pin BCM o canal ADC
-
+        # ── Parámetros ─────────────────────────────────────────────────────
+        self.declare_parameter("sample_rate", 10)  # Hz
         self._sample_rate: int = (
             self.get_parameter("sample_rate").get_parameter_value().integer_value
         )
-        self._sensor_pin: int = (
-            self.get_parameter("sensor_pin").get_parameter_value().integer_value
-        )
 
-        # ── QoS: Best-effort para datos de sensor en tiempo real ──────────
+        # ── Estado del ciclo dummy ─────────────────────────────────────────
+        self._inicio_fase: float = time.monotonic()
+        self._en_fase_alta: bool = True   # empieza publicando 1.0
+
+        # ── QoS ───────────────────────────────────────────────────────────
         qos = QoSProfile(
             depth=10,
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -70,87 +68,68 @@ class NodoSensores(Node):
             qos,
         )
 
-        # ── Timer de muestreo ─────────────────────────────────────────────
-        timer_period_s: float = 1.0 / self._sample_rate
-        self._timer = self.create_timer(timer_period_s, self._timer_callback)
-
-        # ── Inicialización del hardware del sensor ────────────────────────
-        self._init_sensor()
+        # ── Timer ─────────────────────────────────────────────────────────
+        periodo_s: float = 1.0 / self._sample_rate
+        self._timer = self.create_timer(periodo_s, self._timer_callback)
 
         self.get_logger().info(
             f"NodoSensores iniciado | tópico='{self.TOPIC_ESTADO_SENSOR}' "
-            f"| {self._sample_rate} Hz | pin/canal={self._sensor_pin}"
+            f"| {self._sample_rate} Hz | ciclo dummy {FASE_ALTA_S}s×1.0 / "
+            f"{FASE_BAJA_S}s×0.0"
         )
 
     # ------------------------------------------------------------------
-    # Inicialización de hardware
-    # ------------------------------------------------------------------
-    def _init_sensor(self) -> None:
-        """
-        Configura el hardware del sensor.
-
-        TODO (GPIO): Aquí va la inicialización de tu sensor, por ejemplo:
-
-            # Con gpiozero + MCP3008 (SPI):
-            self._sensor = MCP3008(channel=self._sensor_pin)
-
-            # Con ADS1115 (I²C):
-            i2c = busio.I2C(board.SCL, board.SDA)
-            ads  = ADS.ADS1115(i2c)
-            self._channel = AnalogIn(ads, ADS.P0)
-
-            # Sensor digital (GPIO puro):
-            self._gpio_pin = DigitalInputDevice(self._sensor_pin, pull_up=True)
-        """
-        self._sensor = None  # eliminar cuando se implemente el driver real
-        self.get_logger().warning(
-            "Hardware del sensor AÚN NO inicializado — modo simulación activo."
-        )
-
-    # ------------------------------------------------------------------
-    # Lectura del sensor
+    # Lectura del sensor (dummy: ciclo 1.0/0.0)
     # ------------------------------------------------------------------
     def _read_sensor(self) -> float:
         """
-        Lee el valor crudo del sensor y lo retorna como float.
+        Devuelve el valor del sensor.
 
-        TODO (GPIO): Reemplaza el valor simulado con la lectura real:
+        Lógica dummy:
+            - Primeros FASE_ALTA_S segundos de la fase: retorna 1.0
+            - Segundos FASE_BAJA_S segundos de la fase: retorna 0.0
+            - Luego vuelve a 1.0, y así en ciclo infinito.
 
-            # MCP3008 / gpiozero:
-            return float(self._sensor.value)         # 0.0 – 1.0
-
-            # ADS1115:
-            return self._channel.voltage             # voltaje en V
-
-            # GPIO digital:
-            return 1.0 if self._gpio_pin.is_active else 0.0
+        Para conectar el sensor real: elimina toda la lógica de fase y
+        retorna directamente la lectura del hardware, p. ej.:
+            return float(self._canal_adc.voltage)
         """
-        import math, time  # solo para simulación; eliminar después
-        return round(math.sin(time.time()) * 50.0 + 50.0, 3)  # valor simulado
+        ahora = time.monotonic()
+        tiempo_en_fase = ahora - self._inicio_fase
+
+        if self._en_fase_alta:
+            if tiempo_en_fase >= FASE_ALTA_S:
+                # Cambia a fase baja
+                self._en_fase_alta = False
+                self._inicio_fase = ahora
+                self.get_logger().info("Ciclo dummy: cambiando a FASE BAJA (0.0)")
+            return 1.0
+        else:
+            if tiempo_en_fase >= FASE_BAJA_S:
+                # Cambia a fase alta
+                self._en_fase_alta = True
+                self._inicio_fase = ahora
+                self.get_logger().info("Ciclo dummy: cambiando a FASE ALTA (1.0)")
+            return 0.0
 
     # ------------------------------------------------------------------
     # Callback del timer
     # ------------------------------------------------------------------
     def _timer_callback(self) -> None:
-        """Llamado cada 1/sample_rate segundos; publica la lectura del sensor."""
+        """Publica el valor del sensor en /estado_sensor cada 1/sample_rate s."""
         valor = self._read_sensor()
 
         msg = Float32()
         msg.data = valor
-
         self._publisher.publish(msg)
-        self.get_logger().debug(f"Publicando estado_sensor: {valor:.3f}")
+
+        self.get_logger().debug(f"Publicando /estado_sensor: {valor:.1f}")
 
     # ------------------------------------------------------------------
-    # Limpieza al apagar el nodo
+    # Limpieza
     # ------------------------------------------------------------------
     def destroy_node(self) -> None:
-        """
-        TODO (GPIO): Libera recursos del sensor antes de destruir el nodo.
-
-            self._sensor.close()   # gpiozero
-        """
-        self.get_logger().info("NodoSensores: limpiando recursos.")
+        self.get_logger().info("NodoSensores: apagando nodo.")
         super().destroy_node()
 
 
