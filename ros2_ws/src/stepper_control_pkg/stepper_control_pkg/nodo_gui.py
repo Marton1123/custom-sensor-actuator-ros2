@@ -247,76 +247,23 @@ class VentanaPrincipal(QMainWindow):
         root = QWidget()
         self.setCentralWidget(root)
         main_layout = QVBoxLayout(root)
-        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setContentsMargins(0, 0, 0, 0)  # cero márgenes → pantalla completa
         main_layout.setSpacing(0)
 
-        # 1. Barra de título (sin botón SALIR — modo kiosco)
-        main_layout.addWidget(self._make_titlebar())
+        # 1. Cámara — empieza en y=0, ocupa todo el espacio libre
+        main_layout.addWidget(self._make_camera_placeholder(), stretch=3)
 
-        # 2. Placeholder de cámara
-        main_layout.addWidget(self._make_camera_placeholder())
+        # 2. Display LCD (ancho completo, sin márgenes)
+        main_layout.addWidget(self._make_display())
 
-        # 3. Contenido interior con márgenes
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(12, 10, 12, 10)
-        content_layout.setSpacing(10)
+        # 3. Botones de movimiento
+        main_layout.addWidget(self._make_control_group(), stretch=2)
 
-        # 3a. Display LCD ancho completo
-        content_layout.addWidget(self._make_display())
+        # 4. Separador
+        main_layout.addWidget(self._hline())
 
-        # 3b. GroupBox con botones de movimiento
-        content_layout.addWidget(self._make_control_group(), stretch=2)
-
-        # 3c. Separador
-        content_layout.addWidget(self._hline())
-
-        # 3d. Botón PARO DE EMERGENCIA
-        content_layout.addWidget(self._make_stop_button(), stretch=1)
-
-        main_layout.addWidget(content, stretch=1)  # stretch=1 → rellena el resto de pantalla
-
-    # ── Barra de título (modo kiosco — sin botón cerrar) ─────────────────
-
-    def _make_titlebar(self) -> QWidget:
-        """
-        Barra de título decorativa estilo Win95 (azul marino).
-        Incluye un indicador de estado dinámico a la derecha.
-        No tiene botón de cierre — modo kiosco.
-        """
-        bar = QWidget()
-        bar.setFixedHeight(44)
-        bar.setStyleSheet(f"background-color: {NAVY};")
-
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(14, 0, 14, 0)
-        layout.setSpacing(10)
-
-        icon = QLabel("■")
-        icon.setStyleSheet("color: #AAAAFF; font-size: 14px; background: transparent;")
-
-        title = QLabel("PANEL DE CONTROL  —  ACTUADOR NEMA 17")
-        title.setObjectName("lbl_titlebar")
-        title.setAlignment(
-            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
-        )
-
-        # ── Indicador de estado dinámico ────────────────────────────────
-        # Actualizable en tiempo de ejecución con self._lbl_estado_sistema.setText()
-        self._lbl_estado_sistema = QLabel("🟢 SISTEMA ACTIVO")
-        self._lbl_estado_sistema.setStyleSheet(
-            "color: #00FF88; font-size: 13px; font-weight: bold;"
-            "font-family: 'Courier New', monospace; background: transparent;"
-            "padding-right: 6px;"
-        )
-        self._lbl_estado_sistema.setAlignment(
-            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight
-        )
-
-        layout.addWidget(icon)
-        layout.addWidget(title, stretch=1)
-        layout.addWidget(self._lbl_estado_sistema)
-        return bar
+        # 5. PARO DE EMERGENCIA
+        main_layout.addWidget(self._make_stop_button())
 
     # ── Placeholder cámara ──────────────────────────────────────────────
 
@@ -438,16 +385,13 @@ class VentanaPrincipal(QMainWindow):
     def _init_camara(self) -> None:
         """
         Abre /dev/video0 (Logitech C270) y arranca el QTimer a ~30 ms (33 FPS).
-        Si la cámara no está disponible al inicio, el label mostrará SIN SEÑAL
-        y el timer seguirá intentando en cada tick.
+        Si la cámara no está disponible, el label mostrará SIN SEÑAL y el
+        timer seguirá intentando en cada tick.
         """
         self.captura = cv2.VideoCapture(0)   # índice 0 = /dev/video0
 
         if not self.captura.isOpened():
             self._lbl_camara.setText("🔴 SIN SEÑAL DE CÁMARA")
-            self._lbl_estado_sistema.setText("🔴 CÁMARA NO DETECTADA")
-        else:
-            self._lbl_estado_sistema.setText("🟢 SISTEMA ACTIVO")
 
         # QTimer en hilo Qt — seguro para actualizar widgets
         self._timer_camara = QTimer(self)
