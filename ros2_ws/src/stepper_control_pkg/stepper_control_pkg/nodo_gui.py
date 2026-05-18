@@ -273,6 +273,33 @@ class VentanaPrincipal(QMainWindow):
 
         main_layout.addWidget(content)
 
+    # ── Barra de título (modo kiosco — sin botón cerrar) ─────────────────
+
+    def _make_titlebar(self) -> QWidget:
+        """
+        Barra de título decorativa estilo Win95 (azul marino).
+        No tiene botón de cierre — modo kiosco.
+        """
+        bar = QWidget()
+        bar.setFixedHeight(44)
+        bar.setStyleSheet(f"background-color: {NAVY};")
+
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(14, 0, 14, 0)
+
+        icon = QLabel("■")
+        icon.setStyleSheet("color: #AAAAFF; font-size: 14px; background: transparent;")
+
+        title = QLabel("PANEL DE CONTROL  —  ACTUADOR NEMA 17  |  TB6600  |  RPi5")
+        title.setObjectName("lbl_titlebar")
+        title.setAlignment(
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter
+        )
+
+        layout.addWidget(icon)
+        layout.addWidget(title, stretch=1)
+        return bar
+
     # ── Placeholder cámara ──────────────────────────────────────────────
 
     def _make_camera_placeholder(self) -> QLabel:
