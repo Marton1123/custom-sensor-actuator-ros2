@@ -1,21 +1,14 @@
 #!/usr/bin/env python3
 """
-nodo_gui.py
-===========
-Interfaz gráfica táctil (PyQt6) para controlar el motor NEMA 17 desde una
-pantalla de 7 pulgadas (800×480) conectada a la Raspberry Pi 5.
+nodo_gui.py  —  Panel de Control Industrial Retro (PyQt6)
+==========================================================
+Estética SCADA / LabVIEW clásico años 90. Pantalla completa obligatoria.
 
-Arquitectura de hilos:
-    Hilo principal → Qt event loop (QApplication.exec)
-    Hilo daemon    → rclpy.spin(NodoGUI)   [background, nunca bloquea la GUI]
+Arquitectura:
+    Hilo principal → QApplication.exec()   (Qt event loop)
+    Hilo daemon    → rclpy.spin(NodoGUI)    (ROS 2 background)
 
-El NodoGUI publica en /comando_grados (Float32). Los botones de la ventana
-llaman a nodo.publicar_grados(valor) directamente desde el hilo Qt; publish()
-de rclpy es thread-safe, por lo que no se necesitan señales intermedias.
-
-Dependencias:
-    pip3 install PyQt6
-    sudo apt install python3-rclpy ros-jazzy-std-msgs
+Publica en: /comando_grados (std_msgs/Float32)
 """
 
 import sys
@@ -24,356 +17,439 @@ import threading
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
-
 from std_msgs.msg import Float32
 
 from PyQt6.QtWidgets import (
-    QApplication,
-    QMainWindow,
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QGridLayout,
-    QPushButton,
-    QLabel,
-    QFrame,
+    QApplication, QMainWindow, QWidget,
+    QVBoxLayout, QHBoxLayout, QGridLayout,
+    QPushButton, QLabel, QFrame, QGroupBox,
 )
 from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QFont, QPixmap, QIcon
+from PyQt6.QtGui import QFont
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Nodo ROS 2 — publicador de /comando_grados
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
+# Nodo ROS 2
+# ══════════════════════════════════════════════════════════════════════════
 
 class NodoGUI(Node):
-    """
-    Nodo ROS 2 mínimo que sólo publica en /comando_grados.
-    Se ejecuta en un hilo daemon separado del hilo Qt.
-    """
-
     TOPIC = "/comando_grados"
 
     def __init__(self) -> None:
         super().__init__("nodo_gui")
-
-        qos = QoSProfile(
-            depth=10,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.VOLATILE,
-        )
+        qos = QoSProfile(depth=10,
+                         reliability=ReliabilityPolicy.RELIABLE,
+                         durability=DurabilityPolicy.VOLATILE)
         self._pub = self.create_publisher(Float32, self.TOPIC, qos)
-        self.get_logger().info(f"NodoGUI listo — publicando en '{self.TOPIC}'")
+        self.get_logger().info(f"NodoGUI listo → '{self.TOPIC}'")
 
     def publicar_grados(self, grados: float) -> None:
-        """Publica un valor en /comando_grados. Thread-safe."""
         msg = Float32()
         msg.data = float(grados)
         self._pub.publish(msg)
-        self.get_logger().info(f"GUI → {grados:+.1f}°")
+        self.get_logger().info(f"CMD → {grados:+.1f}°")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Estilos — Dark Mode profesional
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
+# Stylesheet — Windows 95 / SCADA industrial retro
+# ══════════════════════════════════════════════════════════════════════════
 
-STYLESHEET = """
-/* ── Base ─────────────────────────────────────────────────────────────── */
-QMainWindow, QWidget {
-    background-color: #0d1117;
-    color: #e6edf3;
-    font-family: 'Segoe UI', 'Inter', 'Arial', sans-serif;
-}
+WIN95_GRAY   = "#D4D0C8"
+WIN95_WHITE  = "#FFFFFF"
+WIN95_LIGHT  = "#EBEBEB"
+WIN95_SHADOW = "#808080"
+WIN95_DARK   = "#404040"
+NAVY         = "#000080"
+LCD_BG       = "#001A00"
+LCD_FG       = "#00FF41"
 
-/* ── Separadores ───────────────────────────────────────────────────────── */
-QFrame[frameShape="4"],
-QFrame[frameShape="5"] {
-    color: #21262d;
-}
+STYLESHEET = f"""
+/* ── Base ── */
+QMainWindow, QWidget {{
+    background-color: {WIN95_GRAY};
+    color: #000000;
+    font-family: "Arial", "MS Sans Serif", sans-serif;
+}}
 
-/* ── Labels generales ──────────────────────────────────────────────────── */
-QLabel {
-    color: #e6edf3;
-    background: transparent;
-}
-
-/* ── Botones de movimiento ─────────────────────────────────────────────── */
-QPushButton {
-    background-color: #161b22;
-    color: #e6edf3;
-    border: 2px solid #30363d;
-    border-radius: 14px;
-    font-size: 20px;
+/* ── Botones de movimiento (efecto bevel 3D) ── */
+QPushButton {{
+    background-color: {WIN95_GRAY};
+    color: #000000;
+    font-family: "Arial", sans-serif;
+    font-size: 19px;
     font-weight: bold;
-    padding: 18px 12px;
-    letter-spacing: 0.5px;
-}
-QPushButton:hover {
-    background-color: #1c2128;
-    border-color: #388bfd;
-    color: #79c0ff;
-}
-QPushButton:pressed {
-    background-color: #1f6feb;
-    border-color: #58a6ff;
-    color: #ffffff;
-}
-QPushButton:disabled {
-    background-color: #161b22;
-    color: #484f58;
-    border-color: #21262d;
-}
+    border-top:    3px solid {WIN95_WHITE};
+    border-left:   3px solid {WIN95_WHITE};
+    border-bottom: 3px solid {WIN95_DARK};
+    border-right:  3px solid {WIN95_DARK};
+    padding: 18px 14px;
+}}
+QPushButton:hover {{
+    background-color: {WIN95_LIGHT};
+}}
+QPushButton:pressed {{
+    border-top:    3px solid {WIN95_DARK};
+    border-left:   3px solid {WIN95_DARK};
+    border-bottom: 3px solid {WIN95_WHITE};
+    border-right:  3px solid {WIN95_WHITE};
+    padding-top:   20px;
+    padding-left:  16px;
+    padding-bottom:16px;
+    padding-right: 12px;
+}}
 
-/* ── Botón PARAR ───────────────────────────────────────────────────────── */
-QPushButton#btn_stop {
-    background-color: #3d0000;
-    color: #ff6b6b;
-    border: 2px solid #da3633;
+/* ── Paro de emergencia ── */
+QPushButton#btn_stop {{
+    background-color: #AA0000;
+    color: #FFFFFF;
     font-size: 26px;
     font-weight: 900;
-    letter-spacing: 2px;
-    border-radius: 14px;
-    padding: 22px 12px;
-}
-QPushButton#btn_stop:hover {
-    background-color: #da3633;
-    color: #ffffff;
-    border-color: #f85149;
-}
-QPushButton#btn_stop:pressed {
-    background-color: #b91c1c;
-    border-color: #ff6b6b;
-    color: #ffffff;
-}
+    letter-spacing: 3px;
+    border-top:    4px solid #FF7777;
+    border-left:   4px solid #FF7777;
+    border-bottom: 4px solid #330000;
+    border-right:  4px solid #330000;
+    padding: 22px 14px;
+}}
+QPushButton#btn_stop:hover {{
+    background-color: #CC0000;
+}}
+QPushButton#btn_stop:pressed {{
+    background-color: #880000;
+    border-top:    4px solid #330000;
+    border-left:   4px solid #330000;
+    border-bottom: 4px solid #FF7777;
+    border-right:  4px solid #FF7777;
+    padding-top:   24px;
+    padding-left:  16px;
+    padding-bottom:20px;
+    padding-right: 12px;
+}}
 
-/* ── Label de título ───────────────────────────────────────────────────── */
-QLabel#lbl_titulo {
+/* ── Botón SALIR (esquina) ── */
+QPushButton#btn_salir {{
+    background-color: {WIN95_GRAY};
+    color: #000000;
+    font-size: 12px;
+    font-weight: bold;
+    border-top:    2px solid {WIN95_WHITE};
+    border-left:   2px solid {WIN95_WHITE};
+    border-bottom: 2px solid {WIN95_DARK};
+    border-right:  2px solid {WIN95_DARK};
+    padding: 4px 12px;
+    min-width: 60px;
+    max-height: 30px;
+}}
+QPushButton#btn_salir:pressed {{
+    border-top:    2px solid {WIN95_DARK};
+    border-left:   2px solid {WIN95_DARK};
+    border-bottom: 2px solid {WIN95_WHITE};
+    border-right:  2px solid {WIN95_WHITE};
+}}
+
+/* ── Barra de título (estilo Win95 activo) ── */
+QLabel#lbl_titlebar {{
+    background-color: {NAVY};
+    color: #FFFFFF;
+    font-size: 17px;
+    font-weight: bold;
+    font-family: "Arial", sans-serif;
+    padding: 6px 14px;
+    letter-spacing: 1px;
+}}
+
+/* ── Display LCD ── */
+QLabel#lbl_display {{
+    background-color: {LCD_BG};
+    color: {LCD_FG};
+    font-family: "Courier New", "Courier", monospace;
     font-size: 22px;
     font-weight: bold;
-    color: #79c0ff;
-    letter-spacing: 1px;
-}
+    border-top:    3px solid {WIN95_SHADOW};
+    border-left:   3px solid {WIN95_SHADOW};
+    border-bottom: 3px solid {WIN95_WHITE};
+    border-right:  3px solid {WIN95_WHITE};
+    padding: 10px 20px;
+    letter-spacing: 2px;
+}}
 
-/* ── Label de subtítulo / estado ───────────────────────────────────────── */
-QLabel#lbl_estado {
-    font-size: 14px;
-    color: #8b949e;
-    letter-spacing: 0.5px;
-}
+/* ── Estado ONLINE ── */
+QLabel#lbl_status {{
+    color: #006400;
+    font-size: 13px;
+    font-weight: bold;
+    font-family: "Courier New", monospace;
+    background: transparent;
+}}
+
+/* ── GroupBox clásico ── */
+QGroupBox {{
+    font-weight: bold;
+    font-size: 13px;
+    color: #000000;
+    border-top:    2px solid {WIN95_SHADOW};
+    border-left:   2px solid {WIN95_SHADOW};
+    border-bottom: 2px solid {WIN95_WHITE};
+    border-right:  2px solid {WIN95_WHITE};
+    margin-top: 14px;
+    padding-top: 6px;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 2px 8px;
+    background-color: {WIN95_GRAY};
+    color: #000000;
+}}
+
+/* ── Separadores ── */
+QFrame[frameShape="4"], QFrame[frameShape="5"] {{
+    color: {WIN95_SHADOW};
+}}
 """
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
 # Ventana principal
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
 
 class VentanaPrincipal(QMainWindow):
     """
-    Ventana táctil optimizada para 800×480 px (pantalla de 7 pulgadas).
+    Panel de control industrial retro. Pantalla completa obligatoria.
 
     Layout:
-        ┌──────────────────────────────────────┐
-        │  [Logo Pinguinin]   Control Motor    │  ← Barra superior
-        ├──────────────────────────────────────┤
-        │  [ +90° ]   [ -90° ]                │  ← Fila 1 de control
-        │  [+360°]   [-360°]                  │  ← Fila 2 de control
-        ├──────────────────────────────────────┤
-        │         ●  PARAR  ●                  │  ← Botón de emergencia
-        ├──────────────────────────────────────┤
-        │  Último comando: ---                 │  ← Barra de estado
-        └──────────────────────────────────────┘
+        ┌─────────────────────────────────────────────────────────────┐
+        │  ░ PANEL DE CONTROL - ACTUADOR NEMA 17          [SALIR]    │  ← Titlebar
+        ├─────────────────────────────────────────────────────────────┤
+        │  ÚLTIMO COMANDO: ---               ● ESTADO: OPERATIVO     │  ← Display
+        ├─ CONTROL DE MOVIMIENTO ────────────────────────────────────┤
+        │        [ +90° ]             [ -90° ]                       │
+        │    [+1 VUELTA +360°]    [-1 VUELTA -360°]                  │
+        ├─────────────────────────────────────────────────────────────┤
+        │            ■■  PARO DE EMERGENCIA  ■■                      │  ← Stop
+        └─────────────────────────────────────────────────────────────┘
     """
 
     def __init__(self, nodo: NodoGUI) -> None:
         super().__init__()
         self._nodo = nodo
-        self._setup_window()
-        self._setup_ui()
-
-    # ── Configuración de ventana ──────────────────────────────────────────
-
-    def _setup_window(self) -> None:
-        self.setWindowTitle("Control Motor NEMA 17 — Pinguinin")
-        self.setMinimumSize(800, 480)
-        self.resize(800, 480)
-        # En la RPi5 con pantalla táctil, descomenta la siguiente línea:
-        # self.showFullScreen()
+        self.setWindowTitle("Panel de Control — NEMA 17")
+        self._build_ui()
+        self.showFullScreen()  # OBLIGATORIO — pantalla completa
 
     # ── Construcción de UI ────────────────────────────────────────────────
 
-    def _setup_ui(self) -> None:
-        widget_central = QWidget()
-        self.setCentralWidget(widget_central)
+    def _build_ui(self) -> None:
+        root = QWidget()
+        self.setCentralWidget(root)
+        main_layout = QVBoxLayout(root)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        layout_raiz = QVBoxLayout(widget_central)
-        layout_raiz.setContentsMargins(16, 12, 16, 12)
-        layout_raiz.setSpacing(12)
+        # 1. Barra de título personalizada
+        main_layout.addWidget(self._make_titlebar())
 
-        # ── 1. Barra superior (logo + título) ─────────────────────────────
-        layout_raiz.addLayout(self._crear_barra_superior())
+        # 2. Contenido interior con márgenes
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(18, 14, 18, 14)
+        content_layout.setSpacing(14)
 
-        # ── Separador ─────────────────────────────────────────────────────
-        layout_raiz.addWidget(self._separador())
+        # 2a. Fila de display + estado
+        content_layout.addLayout(self._make_display_row())
 
-        # ── 2. Grid de botones de control ─────────────────────────────────
-        layout_raiz.addLayout(self._crear_grid_botones(), stretch=3)
+        # 2b. GroupBox con botones de movimiento
+        content_layout.addWidget(self._make_control_group(), stretch=2)
 
-        # ── Separador ─────────────────────────────────────────────────────
-        layout_raiz.addWidget(self._separador())
+        # 2c. Separador
+        content_layout.addWidget(self._hline())
 
-        # ── 3. Botón PARAR ────────────────────────────────────────────────
-        layout_raiz.addWidget(self._crear_boton_stop(), stretch=1)
+        # 2d. Botón PARO DE EMERGENCIA
+        content_layout.addWidget(self._make_stop_button(), stretch=1)
 
-        # ── 4. Barra de estado ────────────────────────────────────────────
-        layout_raiz.addWidget(self._separador())
-        layout_raiz.addWidget(self._crear_barra_estado())
+        main_layout.addWidget(content)
 
-    def _crear_barra_superior(self) -> QHBoxLayout:
-        layout = QHBoxLayout()
-        layout.setSpacing(16)
+    # ── Barra de título ───────────────────────────────────────────────────
 
-        # ── Espacio para el logo de Pinguinin ──────────────────────────────
-        # Para activarlo: copia el archivo del logo en el paquete y descomenta.
-        self._lbl_logo = QLabel()
-        self._lbl_logo.setFixedSize(60, 60)
-        self._lbl_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._lbl_logo.setStyleSheet(
-            "border: 1px solid #30363d; border-radius: 8px; background: #161b22;"
+    def _make_titlebar(self) -> QWidget:
+        bar = QWidget()
+        bar.setFixedHeight(44)
+        bar.setStyleSheet(f"background-color: {NAVY};")
+
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(10, 0, 10, 0)
+
+        icon = QLabel("■")
+        icon.setStyleSheet("color: #AAAAFF; font-size: 14px; background: transparent;")
+
+        title = QLabel("PANEL DE CONTROL  —  ACTUADOR NEMA 17  |  TB6600  |  RPi5")
+        title.setObjectName("lbl_titlebar")
+        title.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+
+        btn_salir = QPushButton("SALIR")
+        btn_salir.setObjectName("btn_salir")
+        btn_salir.setFixedSize(QSize(80, 28))
+        btn_salir.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_salir.setToolTip("Cerrar la aplicación (Alt+F4)")
+        btn_salir.clicked.connect(QApplication.quit)
+
+        layout.addWidget(icon)
+        layout.addWidget(title, stretch=1)
+        layout.addWidget(btn_salir)
+        return bar
+
+    # ── Fila de display ───────────────────────────────────────────────────
+
+    def _make_display_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(18)
+
+        # LCD display de último comando
+        self._lbl_display = QLabel("ÚLTIMO COMANDO:  ---")
+        self._lbl_display.setObjectName("lbl_display")
+        self._lbl_display.setMinimumHeight(56)
+        self._lbl_display.setAlignment(
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
         )
-        # ── LOGO: descomenta y ajusta la ruta cuando tengas el archivo ────
-        # pixmap = QPixmap("/path/to/pinguinin_logo.png")
-        # self._lbl_logo.setPixmap(
-        #     pixmap.scaled(56, 56, Qt.AspectRatioMode.KeepAspectRatio,
-        #                   Qt.TransformationMode.SmoothTransformation)
-        # )
-        # ─────────────────────────────────────────────────────────────────
+        row.addWidget(self._lbl_display, stretch=3)
 
-        # Placeholder visual mientras no hay logo
-        self._lbl_logo.setText("🐧")
-        self._lbl_logo.setFont(QFont("Segoe UI Emoji", 26))
-        layout.addWidget(self._lbl_logo)
+        # Panel de estado
+        status_frame = QFrame()
+        status_frame.setFrameShape(QFrame.Shape.Box)
+        status_frame.setStyleSheet(
+            f"background-color: {WIN95_GRAY};"
+            f"border-top: 2px solid {WIN95_SHADOW};"
+            f"border-left: 2px solid {WIN95_SHADOW};"
+            f"border-bottom: 2px solid {WIN95_WHITE};"
+            f"border-right: 2px solid {WIN95_WHITE};"
+        )
+        status_inner = QVBoxLayout(status_frame)
+        status_inner.setContentsMargins(12, 6, 12, 6)
+        status_inner.setSpacing(4)
 
-        # ── Título y subtítulo ─────────────────────────────────────────────
-        layout_texto = QVBoxLayout()
-        layout_texto.setSpacing(2)
+        lbl_s1 = QLabel("SYS STATUS")
+        lbl_s1.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_s1.setStyleSheet(
+            "font-size:11px; font-weight:bold; color:#000080; background:transparent;"
+        )
 
-        lbl_titulo = QLabel("Control Motor NEMA 17")
-        lbl_titulo.setObjectName("lbl_titulo")
-        layout_texto.addWidget(lbl_titulo)
+        self._lbl_status = QLabel("● OPERATIVO")
+        self._lbl_status.setObjectName("lbl_status")
+        self._lbl_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        lbl_sub = QLabel("Driver TB6600 · Raspberry Pi 5 · ROS 2 Jazzy")
-        lbl_sub.setObjectName("lbl_estado")
-        layout_texto.addWidget(lbl_sub)
+        lbl_topic = QLabel("/comando_grados")
+        lbl_topic.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_topic.setStyleSheet(
+            "font-size:11px; color:#555555; font-family:'Courier New'; background:transparent;"
+        )
 
-        layout.addLayout(layout_texto)
-        layout.addStretch()
-        return layout
+        status_inner.addWidget(lbl_s1)
+        status_inner.addWidget(self._lbl_status)
+        status_inner.addWidget(lbl_topic)
+        row.addWidget(status_frame, stretch=1)
 
-    def _crear_grid_botones(self) -> QGridLayout:
-        """
-        Grid 2×2 con los botones de movimiento relativo.
-        Tamaño mínimo: 170×90 px para ser cómodos con el dedo en 7".
-        """
-        grid = QGridLayout()
-        grid.setSpacing(12)
+        return row
 
-        definiciones = [
-            # (texto, grados, fila, columna, tooltip)
-            ("+90°",        90.0,   0, 0, "Girar 90° en sentido horario"),
-            ("-90°",        -90.0,  0, 1, "Girar 90° en sentido antihorario"),
-            ("+1 Vuelta",   360.0,  1, 0, "Girar 1 vuelta completa (360°) horario"),
-            ("-1 Vuelta",   -360.0, 1, 1, "Girar 1 vuelta completa (360°) antihorario"),
+    # ── GroupBox de control ───────────────────────────────────────────────
+
+    def _make_control_group(self) -> QGroupBox:
+        group = QGroupBox(" CONTROL DE MOVIMIENTO ")
+        grid = QGridLayout(group)
+        grid.setSpacing(14)
+        grid.setContentsMargins(14, 16, 14, 14)
+
+        botones = [
+            ("+90°",                  90.0,    0, 0),
+            ("-90°",                  -90.0,   0, 1),
+            ("+1 VUELTA  (+360°)",    360.0,   1, 0),
+            ("-1 VUELTA  (-360°)",   -360.0,   1, 1),
         ]
 
-        for texto, grados, fila, col, tooltip in definiciones:
+        for texto, grados, fila, col in botones:
             btn = QPushButton(texto)
-            btn.setToolTip(tooltip)
-            btn.setMinimumSize(QSize(170, 90))
+            btn.setMinimumSize(QSize(200, 90))
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            # Captura 'grados' por valor en el lambda con argumento por defecto
-            btn.clicked.connect(lambda _, g=grados: self._enviar_grados(g))
+            btn.clicked.connect(lambda _, g=grados: self._enviar(g))
             grid.addWidget(btn, fila, col)
 
-        return grid
+        return group
 
-    def _crear_boton_stop(self) -> QPushButton:
-        btn_stop = QPushButton("⬛  PARAR")
-        btn_stop.setObjectName("btn_stop")
-        btn_stop.setMinimumHeight(80)
-        btn_stop.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_stop.setToolTip("Detener el motor inmediatamente (envía 0°)")
-        btn_stop.clicked.connect(lambda: self._enviar_grados(0.0))
-        return btn_stop
+    # ── Botón de emergencia ───────────────────────────────────────────────
 
-    def _crear_barra_estado(self) -> QLabel:
-        self._lbl_estado = QLabel("Último comando:  —")
-        self._lbl_estado.setObjectName("lbl_estado")
-        self._lbl_estado.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        return self._lbl_estado
+    def _make_stop_button(self) -> QPushButton:
+        btn = QPushButton("■■   PARO DE EMERGENCIA   ■■")
+        btn.setObjectName("btn_stop")
+        btn.setMinimumHeight(90)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setToolTip("Envía 0° — detiene el motor inmediatamente")
+        btn.clicked.connect(lambda: self._enviar(0.0))
+        return btn
+
+    # ── Helpers ───────────────────────────────────────────────────────────
 
     @staticmethod
-    def _separador() -> QFrame:
-        linea = QFrame()
-        linea.setFrameShape(QFrame.Shape.HLine)
-        linea.setFrameShadow(QFrame.Shadow.Sunken)
-        return linea
+    def _hline() -> QFrame:
+        f = QFrame()
+        f.setFrameShape(QFrame.Shape.HLine)
+        f.setFrameShadow(QFrame.Shadow.Sunken)
+        return f
 
-    # ── Lógica de publicación ─────────────────────────────────────────────
-
-    def _enviar_grados(self, grados: float) -> None:
-        """
-        Publica el valor en /comando_grados y actualiza la barra de estado.
-        Corre en el hilo Qt (main thread); publish() de rclpy es thread-safe.
-        """
+    def _enviar(self, grados: float) -> None:
+        """Publica en /comando_grados y actualiza el display LCD."""
         self._nodo.publicar_grados(grados)
 
         if grados == 0.0:
-            texto_estado = "Último comando:  PARAR (0°)"
-            color = "#f85149"
+            self._lbl_display.setText("ÚLTIMO COMANDO:  *** PARO ***")
+            self._lbl_display.setStyleSheet(
+                f"background-color:{LCD_BG}; color:#FF4444;"
+                "font-family:'Courier New',monospace; font-size:22px; font-weight:bold;"
+                f"border-top:3px solid {WIN95_SHADOW}; border-left:3px solid {WIN95_SHADOW};"
+                f"border-bottom:3px solid {WIN95_WHITE}; border-right:3px solid {WIN95_WHITE};"
+                "padding:10px 20px; letter-spacing:2px;"
+            )
         else:
-            signo = "+" if grados > 0 else ""
-            texto_estado = f"Último comando:  {signo}{grados:.1f}°"
-            color = "#56d364" if grados > 0 else "#ffa657"
+            signo  = "+" if grados > 0 else ""
+            color  = "#00FF41" if grados > 0 else "#FFD700"
+            self._lbl_display.setText(f"ÚLTIMO COMANDO:  {signo}{grados:.1f}°")
+            self._lbl_display.setStyleSheet(
+                f"background-color:{LCD_BG}; color:{color};"
+                "font-family:'Courier New',monospace; font-size:22px; font-weight:bold;"
+                f"border-top:3px solid {WIN95_SHADOW}; border-left:3px solid {WIN95_SHADOW};"
+                f"border-bottom:3px solid {WIN95_WHITE}; border-right:3px solid {WIN95_WHITE};"
+                "padding:10px 20px; letter-spacing:2px;"
+            )
 
-        self._lbl_estado.setText(texto_estado)
-        self._lbl_estado.setStyleSheet(f"color: {color}; font-size: 14px;")
+    def keyPressEvent(self, event) -> None:
+        """Escape también cierra la aplicación (fallback táctil)."""
+        if event.key() == Qt.Key.Key_Escape:
+            QApplication.quit()
+        super().keyPressEvent(event)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
 # Punto de entrada
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
 
 def main(args=None) -> None:
-    """
-    Orden de arranque:
-        1. rclpy.init()
-        2. NodoGUI() — crea el nodo y el publicador
-        3. hilo daemon → rclpy.spin(nodo)   [background]
-        4. QApplication + VentanaPrincipal  [main thread]
-        5. Al cerrar la ventana → destroy_node() + rclpy.shutdown()
-    """
     rclpy.init(args=args)
     nodo = NodoGUI()
 
-    # ── Hilo daemon de ROS 2 ──────────────────────────────────────────────
     hilo_ros = threading.Thread(
         target=rclpy.spin,
         args=(nodo,),
-        daemon=True,        # muere automáticamente cuando el proceso Qt termina
+        daemon=True,
         name="hilo_rclpy",
     )
     hilo_ros.start()
 
-    # ── Aplicación Qt en el hilo principal ───────────────────────────────
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
 
     ventana = VentanaPrincipal(nodo)
-    ventana.show()
+    # showFullScreen() se llama dentro de VentanaPrincipal.__init__
 
-    exit_code = app.exec()   # bloquea hasta que se cierra la ventana
+    exit_code = app.exec()
 
-    # ── Limpieza ──────────────────────────────────────────────────────────
     nodo.destroy_node()
     rclpy.shutdown()
     sys.exit(exit_code)
