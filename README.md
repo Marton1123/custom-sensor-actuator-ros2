@@ -66,3 +66,45 @@ ros2 run stepper_control_pkg nodo_actuadores
 ros2 topic echo /estado_sensor
 ros2 topic pub /control_manual std_msgs/msg/Bool "data: true" --once
 ```
+
+---
+
+## Pipeline de dataset en PC (Windows/Linux, sin ROS)
+
+Todo el flujo de dataset/entrenamiento ocurre en tu PC local. La Raspberry Pi solo ejecuta inferencia con el modelo final.
+
+### 1) Captura + filtrado de frames + subida opcional a Roboflow
+
+```bash
+pip install opencv-python ultralytics roboflow
+
+python scripts/dataset_pipeline.py run ^
+  --duration 180 ^
+  --out-root .\dataset_work ^
+  --upload ^
+  --roboflow-api-key TU_KEY ^
+  --roboflow-workspace TU_WORKSPACE ^
+  --roboflow-project TU_PROYECTO
+```
+
+Este comando:
+- graba video de camara,
+- toma muestras de frames,
+- conserva los que tienen deteccion de `bottle` (YOLOv8n COCO),
+- y los sube a Roboflow en splits train/valid/test.
+
+### 2) Entrenamiento + exportacion NCNN INT8 (PC)
+
+```bash
+python scripts/train_and_export.py \
+  --roboflow-api-key TU_KEY \
+  --roboflow-workspace TU_WORKSPACE \
+  --roboflow-project TU_PROYECTO \
+  --roboflow-version 1
+```
+
+### 3) Despliegue a Raspberry Pi (solo modelo)
+
+```bash
+scp -r runs/detect/botella_yolov8n/weights/best_ncnn_model/ pi@<IP_RPI>:~/modelos/
+```
