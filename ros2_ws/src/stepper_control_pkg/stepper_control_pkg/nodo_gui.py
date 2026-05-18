@@ -235,8 +235,10 @@ class VentanaPrincipal(QMainWindow):
         super().__init__()
         self._nodo = nodo
         self.setWindowTitle("Panel de Control — NEMA 17")
-        # ── MODO KIOSCO: sin decoración de ventana del sistema operativo ──
+        # ── MODO KIOSCO ──
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        # WindowFullScreen garantiza pantalla completa en X11/Xorg (RPi5)
+        self.setWindowState(Qt.WindowState.WindowFullScreen)
         self._build_ui()          # crea self._lbl_camara (necesario antes del timer)
         self._init_camara()       # inicializa VideoCapture y QTimer
         self.showFullScreen()
@@ -248,7 +250,7 @@ class VentanaPrincipal(QMainWindow):
         self.setCentralWidget(root)
         main_layout = QVBoxLayout(root)
         main_layout.setContentsMargins(0, 0, 0, 0)  # cero márgenes → pantalla completa
-        main_layout.setSpacing(0)
+        main_layout.setSpacing(5)                    # espacio mínimo entre secciones
 
         # 1. Cámara — empieza en y=0, ocupa todo el espacio libre
         main_layout.addWidget(self._make_camera_placeholder(), stretch=3)
@@ -287,6 +289,7 @@ class VentanaPrincipal(QMainWindow):
             QSizePolicy.Policy.Expanding,
         )
         lbl.setMinimumHeight(120)   # mínimo de seguridad
+        lbl.setMaximumHeight(350)   # tope → evita que robe todo el alto en pantallas pequeñas
         self._lbl_camara = lbl      # referencia para actualizar desde el timer
         return lbl
 
@@ -311,6 +314,7 @@ class VentanaPrincipal(QMainWindow):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
         )
+        group.setMaximumHeight(250)  # tope → previene desbordamiento en 800px de alto
         grid = QGridLayout(group)
         grid.setSpacing(10)
         grid.setContentsMargins(10, 14, 10, 10)
@@ -340,7 +344,7 @@ class VentanaPrincipal(QMainWindow):
     def _make_stop_button(self) -> QPushButton:
         btn = QPushButton("■■   PARO DE EMERGENCIA   ■■")
         btn.setObjectName("btn_stop")
-        btn.setMinimumHeight(90)
+        btn.setFixedHeight(90)       # altura fija → siempre visible al pie de pantalla
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setToolTip("Envía 0° — detiene el motor inmediatamente")
         btn.clicked.connect(lambda: self._enviar(0.0))
