@@ -2,7 +2,8 @@
 """
 nodo_gui.py  —  Panel de Control Industrial Retro (PyQt6)
 ==========================================================
-Estética SCADA / LabVIEW clásico años 90. Pantalla completa obligatoria.
+Modo Kiosco — pantalla vertical 480×800, sin bordes de ventana (FramelessWindowHint).
+Estética SCADA / LabVIEW clásico años 90.
 
 Arquitectura:
     Hilo principal → QApplication.exec()   (Qt event loop)
@@ -126,26 +127,7 @@ QPushButton#btn_stop:pressed {{
     padding-right: 12px;
 }}
 
-/* ── Botón SALIR (esquina) ── */
-QPushButton#btn_salir {{
-    background-color: {WIN95_GRAY};
-    color: #000000;
-    font-size: 12px;
-    font-weight: bold;
-    border-top:    2px solid {WIN95_WHITE};
-    border-left:   2px solid {WIN95_WHITE};
-    border-bottom: 2px solid {WIN95_DARK};
-    border-right:  2px solid {WIN95_DARK};
-    padding: 4px 12px;
-    min-width: 60px;
-    max-height: 30px;
-}}
-QPushButton#btn_salir:pressed {{
-    border-top:    2px solid {WIN95_DARK};
-    border-left:   2px solid {WIN95_DARK};
-    border-bottom: 2px solid {WIN95_WHITE};
-    border-right:  2px solid {WIN95_WHITE};
-}}
+/* btn_salir eliminado — modo kiosco sin botón de cierre */
 
 /* ── Barra de título (estilo Win95 activo) ── */
 QLabel#lbl_titlebar {{
@@ -206,6 +188,21 @@ QGroupBox::title {{
 QFrame[frameShape="4"], QFrame[frameShape="5"] {{
     color: {WIN95_SHADOW};
 }}
+
+/* ── Placeholder cámara ── */
+QLabel#lbl_camara {{
+    background-color: #000000;
+    color: #004400;
+    font-family: "Courier New", monospace;
+    font-size: 15px;
+    font-weight: bold;
+    letter-spacing: 2px;
+    /* Borde inset estilo 90s: sombra arriba/izq, claro abajo/der */
+    border-top:    4px solid {WIN95_DARK};
+    border-left:   4px solid {WIN95_DARK};
+    border-bottom: 4px solid {WIN95_WHITE};
+    border-right:  4px solid {WIN95_WHITE};
+}}
 """
 
 
@@ -215,27 +212,31 @@ QFrame[frameShape="4"], QFrame[frameShape="5"] {{
 
 class VentanaPrincipal(QMainWindow):
     """
-    Panel de control industrial retro. Pantalla completa obligatoria.
+    Panel de control industrial retro — Modo Kiosco vertical 480×800.
 
-    Layout:
-        ┌─────────────────────────────────────────────────────────────┐
-        │  ░ PANEL DE CONTROL - ACTUADOR NEMA 17          [SALIR]    │  ← Titlebar
-        ├─────────────────────────────────────────────────────────────┤
-        │  ÚLTIMO COMANDO: ---               ● ESTADO: OPERATIVO     │  ← Display
-        ├─ CONTROL DE MOVIMIENTO ────────────────────────────────────┤
-        │        [ +90° ]             [ -90° ]                       │
-        │    [+1 VUELTA +360°]    [-1 VUELTA -360°]                  │
-        ├─────────────────────────────────────────────────────────────┤
-        │            ■■  PARO DE EMERGENCIA  ■■                      │  ← Stop
-        └─────────────────────────────────────────────────────────────┘
+    Layout (vertical):
+        ┌──────────────────────────────┐
+        │  PANEL DE CONTROL NEMA 17   │  ← Titlebar navy (sin botón cerrar)
+        ├──────────────────────────────┤
+        │  [  CÁMARA DE DETECCIÓN  ]  │  ← Placeholder cámara 480×270
+        ├──────────────────────────────┤
+        │  ÚLTIMO COMANDO: ---        │  ← Display LCD
+        ├─ CONTROL DE MOVIMIENTO ─────┤
+        │  [ +90° ]    [ -90°  ]      │
+        │  [+360° ]    [ -360° ]      │
+        ├──────────────────────────────┤
+        │  ■■  PARO DE EMERGENCIA  ■■ │  ← Stop
+        └──────────────────────────────┘
     """
 
     def __init__(self, nodo: NodoGUI) -> None:
         super().__init__()
         self._nodo = nodo
         self.setWindowTitle("Panel de Control — NEMA 17")
+        # ── MODO KIOSCO: sin decoración de ventana del sistema operativo ──
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self._build_ui()
-        self.showFullScreen()  # OBLIGATORIO — pantalla completa
+        self.showFullScreen()
 
     # ── Construcción de UI ────────────────────────────────────────────────
 
@@ -246,128 +247,92 @@ class VentanaPrincipal(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # 1. Barra de título personalizada
+        # 1. Barra de título (sin botón SALIR — modo kiosco)
         main_layout.addWidget(self._make_titlebar())
 
-        # 2. Contenido interior con márgenes
+        # 2. Placeholder de cámara
+        main_layout.addWidget(self._make_camera_placeholder())
+
+        # 3. Contenido interior con márgenes
         content = QWidget()
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(18, 14, 18, 14)
-        content_layout.setSpacing(14)
+        content_layout.setContentsMargins(12, 10, 12, 10)
+        content_layout.setSpacing(10)
 
-        # 2a. Fila de display + estado
-        content_layout.addLayout(self._make_display_row())
+        # 3a. Display LCD ancho completo
+        content_layout.addWidget(self._make_display())
 
-        # 2b. GroupBox con botones de movimiento
+        # 3b. GroupBox con botones de movimiento
         content_layout.addWidget(self._make_control_group(), stretch=2)
 
-        # 2c. Separador
+        # 3c. Separador
         content_layout.addWidget(self._hline())
 
-        # 2d. Botón PARO DE EMERGENCIA
+        # 3d. Botón PARO DE EMERGENCIA
         content_layout.addWidget(self._make_stop_button(), stretch=1)
 
         main_layout.addWidget(content)
 
-    # ── Barra de título ───────────────────────────────────────────────────
+    # ── Placeholder cámara ──────────────────────────────────────────────
 
-    def _make_titlebar(self) -> QWidget:
-        bar = QWidget()
-        bar.setFixedHeight(44)
-        bar.setStyleSheet(f"background-color: {NAVY};")
+    def _make_camera_placeholder(self) -> QLabel:
+        """
+        Marco negro con texto verde oscuro que simula un feed de cámara apagado.
+        Altura fija 200 px para la orientación vertical 480×800.
 
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(10, 0, 10, 0)
+        Para conectar el video real (ej. con OpenCV + QImage):
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = frame.shape
+            img = QImage(frame.data, w, h, ch * w, QImage.Format.Format_RGB888)
+            self._lbl_camara.setPixmap(QPixmap.fromImage(img))
+        """
+        lbl = QLabel()
+        lbl.setObjectName("lbl_camara")
+        lbl.setFixedHeight(200)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setText(
+            "██  CÁMARA DE DETECCIÓN  ██\n\n"
+            "[ SIN SEÑAL ]\n\n"
+            "Ch.01  480×800  LIVE"
+        )
+        return lbl
 
-        icon = QLabel("■")
-        icon.setStyleSheet("color: #AAAAFF; font-size: 14px; background: transparent;")
+    # ── Display LCD (ancho completo) ────────────────────────────────────
 
-        title = QLabel("PANEL DE CONTROL  —  ACTUADOR NEMA 17  |  TB6600  |  RPi5")
-        title.setObjectName("lbl_titlebar")
-        title.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-
-        btn_salir = QPushButton("SALIR")
-        btn_salir.setObjectName("btn_salir")
-        btn_salir.setFixedSize(QSize(80, 28))
-        btn_salir.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_salir.setToolTip("Cerrar la aplicación (Alt+F4)")
-        btn_salir.clicked.connect(QApplication.quit)
-
-        layout.addWidget(icon)
-        layout.addWidget(title, stretch=1)
-        layout.addWidget(btn_salir)
-        return bar
-
-    # ── Fila de display ───────────────────────────────────────────────────
-
-    def _make_display_row(self) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.setSpacing(18)
-
-        # LCD display de último comando
+    def _make_display(self) -> QLabel:
+        """Label tipo LCD de ancho completo que muestra el último comando enviado."""
         self._lbl_display = QLabel("ÚLTIMO COMANDO:  ---")
         self._lbl_display.setObjectName("lbl_display")
-        self._lbl_display.setMinimumHeight(56)
+        self._lbl_display.setFixedHeight(60)
         self._lbl_display.setAlignment(
-            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter
         )
-        row.addWidget(self._lbl_display, stretch=3)
-
-        # Panel de estado
-        status_frame = QFrame()
-        status_frame.setFrameShape(QFrame.Shape.Box)
-        status_frame.setStyleSheet(
-            f"background-color: {WIN95_GRAY};"
-            f"border-top: 2px solid {WIN95_SHADOW};"
-            f"border-left: 2px solid {WIN95_SHADOW};"
-            f"border-bottom: 2px solid {WIN95_WHITE};"
-            f"border-right: 2px solid {WIN95_WHITE};"
-        )
-        status_inner = QVBoxLayout(status_frame)
-        status_inner.setContentsMargins(12, 6, 12, 6)
-        status_inner.setSpacing(4)
-
-        lbl_s1 = QLabel("SYS STATUS")
-        lbl_s1.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_s1.setStyleSheet(
-            "font-size:11px; font-weight:bold; color:#000080; background:transparent;"
-        )
-
-        self._lbl_status = QLabel("● OPERATIVO")
-        self._lbl_status.setObjectName("lbl_status")
-        self._lbl_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        lbl_topic = QLabel("/comando_grados")
-        lbl_topic.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_topic.setStyleSheet(
-            "font-size:11px; color:#555555; font-family:'Courier New'; background:transparent;"
-        )
-
-        status_inner.addWidget(lbl_s1)
-        status_inner.addWidget(self._lbl_status)
-        status_inner.addWidget(lbl_topic)
-        row.addWidget(status_frame, stretch=1)
-
-        return row
+        return self._lbl_display
 
     # ── GroupBox de control ───────────────────────────────────────────────
 
     def _make_control_group(self) -> QGroupBox:
+        """Grid 2×2 de botones táctiles optimizado para pantalla vertical 480px."""
         group = QGroupBox(" CONTROL DE MOVIMIENTO ")
         grid = QGridLayout(group)
-        grid.setSpacing(14)
-        grid.setContentsMargins(14, 16, 14, 14)
+        grid.setSpacing(10)
+        grid.setContentsMargins(10, 14, 10, 10)
 
         botones = [
-            ("+90°",                  90.0,    0, 0),
-            ("-90°",                  -90.0,   0, 1),
-            ("+1 VUELTA  (+360°)",    360.0,   1, 0),
-            ("-1 VUELTA  (-360°)",   -360.0,   1, 1),
+            ("+90°",               90.0,   0, 0),
+            ("-90°",              -90.0,   0, 1),
+            ("+1 VUELTA (+360°)", 360.0,   1, 0),
+            ("-1 VUELTA (-360°)",-360.0,   1, 1),
         ]
 
         for texto, grados, fila, col in botones:
             btn = QPushButton(texto)
-            btn.setMinimumSize(QSize(200, 90))
+            # En 480 px de ancho con 2 columnas y márgenes: ~220 px c/u
+            btn.setMinimumSize(QSize(180, 100))
+            btn.setSizePolicy(
+                btn.sizePolicy().horizontalPolicy(),
+                btn.sizePolicy().verticalPolicy(),
+            )
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _, g=grados: self._enviar(g))
             grid.addWidget(btn, fila, col)
@@ -420,9 +385,8 @@ class VentanaPrincipal(QMainWindow):
             )
 
     def keyPressEvent(self, event) -> None:
-        """Escape también cierra la aplicación (fallback táctil)."""
-        if event.key() == Qt.Key.Key_Escape:
-            QApplication.quit()
+        """Modo kiosco: no se cierra con ninguna tecla."""
+        # Escape deshabilitado intencionalmente en modo kiosco.
         super().keyPressEvent(event)
 
 
