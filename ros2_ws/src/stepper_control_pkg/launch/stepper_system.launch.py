@@ -1,19 +1,5 @@
 #!/usr/bin/env python3
-"""
-Launch file para arrancar ambos nodos simultáneamente.
-
-Uso (desde el workspace compilado):
-    ros2 launch stepper_control_pkg stepper_system.launch.py
-
-Parámetros configurables:
-    sample_rate  : frecuencia de muestreo del sensor en Hz     [default: 10]
-    sensor_pin   : canal/pin del sensor                        [default: 0]
-    umbral       : umbral para activar el motor                [default: 50.0]
-    step_delay   : retardo entre pasos del motor (segundos)    [default: 0.002]
-    pin_step     : pin STEP del TB6600                         [default: 17]
-    pin_dir      : pin DIR del TB6600                          [default: 27]
-    pin_ena      : pin ENA del TB6600                          [default: 22]
-"""
+"""Launch principal para sensores + actuadores + visión (YOLO NCNN)."""
 
 from launch import LaunchDescription
 from launch_ros.actions import Node
@@ -25,13 +11,20 @@ def generate_launch_description() -> LaunchDescription:
 
     # ── Argumentos declarados (sobreescribibles desde CLI) ────────────────
     args = [
-        DeclareLaunchArgument("sample_rate",  default_value="10"),
-        DeclareLaunchArgument("sensor_pin",   default_value="0"),
-        DeclareLaunchArgument("umbral",       default_value="50.0"),
-        DeclareLaunchArgument("step_delay",   default_value="0.002"),
-        DeclareLaunchArgument("pin_step",     default_value="17"),
-        DeclareLaunchArgument("pin_dir",      default_value="27"),
-        DeclareLaunchArgument("pin_ena",      default_value="22"),
+        DeclareLaunchArgument("sample_rate", default_value="10"),
+        DeclareLaunchArgument("gpio_chip", default_value="4"),
+        DeclareLaunchArgument("pin_step", default_value="17"),
+        DeclareLaunchArgument("pin_dir", default_value="27"),
+        DeclareLaunchArgument("pasos_por_rev", default_value="3200"),
+        DeclareLaunchArgument("delay_pulso", default_value="0.0005"),
+        DeclareLaunchArgument("modelo_ncnn", default_value="/home/pi/modelos/best_ncnn_model"),
+        DeclareLaunchArgument("cam_id", default_value="0"),
+        DeclareLaunchArgument("cam_width", default_value="640"),
+        DeclareLaunchArgument("cam_height", default_value="480"),
+        DeclareLaunchArgument("cam_fps", default_value="30"),
+        DeclareLaunchArgument("infer_hz", default_value="10.0"),
+        DeclareLaunchArgument("k_area", default_value="0.05"),
+        DeclareLaunchArgument("conf_threshold", default_value="0.70"),
     ]
 
     nodo_sensores = Node(
@@ -41,7 +34,6 @@ def generate_launch_description() -> LaunchDescription:
         output="screen",
         parameters=[{
             "sample_rate": LaunchConfiguration("sample_rate"),
-            "sensor_pin":  LaunchConfiguration("sensor_pin"),
         }],
     )
 
@@ -51,12 +43,29 @@ def generate_launch_description() -> LaunchDescription:
         name="nodo_actuadores",
         output="screen",
         parameters=[{
-            "umbral":      LaunchConfiguration("umbral"),
-            "step_delay":  LaunchConfiguration("step_delay"),
-            "pin_step":    LaunchConfiguration("pin_step"),
-            "pin_dir":     LaunchConfiguration("pin_dir"),
-            "pin_ena":     LaunchConfiguration("pin_ena"),
+            "gpio_chip": LaunchConfiguration("gpio_chip"),
+            "pin_step": LaunchConfiguration("pin_step"),
+            "pin_dir": LaunchConfiguration("pin_dir"),
+            "pasos_por_rev": LaunchConfiguration("pasos_por_rev"),
+            "delay_pulso": LaunchConfiguration("delay_pulso"),
         }],
     )
 
-    return LaunchDescription(args + [nodo_sensores, nodo_actuadores])
+    nodo_vision = Node(
+        package="stepper_control_pkg",
+        executable="nodo_vision",
+        name="nodo_vision",
+        output="screen",
+        parameters=[{
+            "modelo_ncnn": LaunchConfiguration("modelo_ncnn"),
+            "cam_id": LaunchConfiguration("cam_id"),
+            "cam_width": LaunchConfiguration("cam_width"),
+            "cam_height": LaunchConfiguration("cam_height"),
+            "cam_fps": LaunchConfiguration("cam_fps"),
+            "infer_hz": LaunchConfiguration("infer_hz"),
+            "k_area": LaunchConfiguration("k_area"),
+            "conf_threshold": LaunchConfiguration("conf_threshold"),
+        }],
+    )
+
+    return LaunchDescription(args + [nodo_sensores, nodo_actuadores, nodo_vision])

@@ -31,6 +31,7 @@ setup(
             "nodo_sensores   = stepper_control_pkg.nodo_sensores:main",
             "nodo_actuadores = stepper_control_pkg.nodo_actuadores:main",
             "nodo_gui        = stepper_control_pkg.nodo_gui:main",
+            "nodo_vision     = stepper_control_pkg.nodo_vision:main",
         ],
     },
 )
