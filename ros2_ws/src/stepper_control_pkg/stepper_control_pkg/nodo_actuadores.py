@@ -5,86 +5,96 @@ nodo_actuadores.py
 Nodo ROS 2 (Jazzy Jalisco) que controla un motor paso a paso NEMA 17 mediante
 el driver TB6600, usando lgpio sobre /dev/gpiochip4 (Raspberry Pi 5).
 
-Suscripción:
-    /comando_motor  (std_msgs/Int32)
-        • Valor positivo (+N) → DIR HIGH (CW)  + N pulsos en PUL
-        • Valor negativo (-N) → DIR LOW  (CCW) + N pulsos en PUL
-        • Valor 0             → cancela el movimiento en curso
+Tópicos de suscripción:
+    /comando_motor  (std_msgs/Int32)   → Pasos directos (+CW / -CCW / 0=stop)
+    /comando_grados (std_msgs/Float32) → Grados → convertidos internamente a pasos
 
 Pinout TB6600 → Raspberry Pi 5 (BCM):
     PUL+  → GPIO 17   (pin_step)
     DIR+  → GPIO 27   (pin_dir)
-    GND   → GND
+    GND   → GND compartido con la RPi5
 
 Hardware : Raspberry Pi 5 — Ubuntu 24.04
 GPIO lib : lgpio  (sudo apt install python3-lgpio)
 
-NOTA sobre gpiochip en RPi5:
-    La RPi5 expone sus GPIOs en /dev/gpiochip4.
-    Si obtienes "permission denied", añade tu usuario al grupo gpio:
-        sudo usermod -aG gpio $USER   (luego cierra sesión y vuelve a entrar)
-    O ejecuta el nodo con sudo para depuración inicial.
+Conversión grados → pasos:
+    pasos = int(round((grados / 360.0) * pasos_por_rev))
+    Con pasos_por_rev=3200 (microstepping 1/16):
+        90°  →  800 pasos
+        45°  →  400 pasos
+        1°   →    8.89 pasos ≈ 9 pasos
+
+Velocidad:
+    El parámetro 'delay_pulso' (s) controla el tiempo de cada semi-ciclo del
+    pulso STEP. Puede cambiarse en caliente sin recompilar:
+        ros2 param set /nodo_actuadores delay_pulso 0.001
+
+    El nuevo valor se aplica al PRÓXIMO comando recibido.
+
+NOTA sobre permisos en RPi5:
+    Si lgpio lanza "can't open /dev/gpiochip4":
+        sudo usermod -aG gpio $USER   (cierra sesión y vuelve a entrar)
+    Para depurar sin reiniciar sesión:
+        sudo ros2 run stepper_control_pkg nodo_actuadores
 """
 
 import time
 import threading
 
-# Import directo — sin fallback de simulación.
-# Si lgpio no está instalado o no hay permisos, el proceso falla con el
-# error real para que puedas depurarlo.
-import lgpio
+import lgpio  # Falla ruidosamente si no está instalado o sin permisos → depura aquí
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
-from std_msgs.msg import Int32
+from std_msgs.msg import Int32, Float32
 
 
-# ── Constantes de hardware ────────────────────────────────────────────────
-_DIR_CW:  int   = 1        # DIR+ HIGH → giro horario       (CW)
-_DIR_CCW: int   = 0        # DIR+ LOW  → giro antihorario   (CCW)
-_PULSE_DELAY_S: float = 0.002   # 2 ms por semi-ciclo del pulso STEP
-                                 # → periodo completo = 4 ms → 250 pasos/s máx.
-                                 # TB6600 datasheet: mín. PUL high = 5 µs,
-                                 # así que 2 ms es muy conservador y seguro.
+# ── Constantes de dirección ───────────────────────────────────────────────
+_DIR_CW:  int = 1   # DIR+ HIGH → giro horario       (CW,  positivo)
+_DIR_CCW: int = 0   # DIR+ LOW  → giro antihorario   (CCW, negativo)
 
 
 class NodoActuadores(Node):
     """
-    Nodo suscriptor que ejecuta trenes de pulsos discretos sobre el TB6600.
+    Nodo suscriptor de comandos de movimiento para el NEMA 17 / TB6600.
 
-    Cada mensaje en /comando_motor dispara un movimiento de N pasos en un
-    hilo separado, de modo que el ejecutor ROS 2 nunca se bloquea.
+    Ambos tópicos convergen en el mismo hilo daemon de ejecución de pasos,
+    garantizando que nunca haya dos movimientos simultáneos.
 
     Parámetros ROS 2:
-        gpio_chip    (int)   : índice del chip GPIO [default: 4  → /dev/gpiochip4]
-        pin_step     (int)   : pin PUL+ del TB6600  [default: 17]
-        pin_dir      (int)   : pin DIR+ del TB6600  [default: 27]
-        pulse_delay  (float) : retardo (s) entre flanco HIGH y LOW del pulso
-                               [default: 0.002]
+        gpio_chip    (int)   : chip GPIO [default: 4  → /dev/gpiochip4 en RPi5]
+        pin_step     (int)   : pin PUL+  [default: 17]
+        pin_dir      (int)   : pin DIR+  [default: 27]
+        pasos_por_rev(int)   : pasos/revolución incluyendo microstepping [default: 3200]
+        delay_pulso  (float) : semi-ciclo del pulso STEP en segundos     [default: 0.0005]
+                               → Periodo completo = 2 × delay_pulso
+                               → 0.0005 s → 1 ms/ciclo → 1000 pasos/s → ≈18.75 RPM
     """
 
-    TOPIC_COMANDO_MOTOR = "/comando_motor"
+    TOPIC_COMANDO_MOTOR  = "/comando_motor"
+    TOPIC_COMANDO_GRADOS = "/comando_grados"
 
     def __init__(self) -> None:
         super().__init__("nodo_actuadores")
 
         # ── Parámetros ─────────────────────────────────────────────────────
-        self.declare_parameter("gpio_chip",   4)
-        self.declare_parameter("pin_step",   17)
-        self.declare_parameter("pin_dir",    27)
-        self.declare_parameter("pulse_delay", _PULSE_DELAY_S)
+        self.declare_parameter("gpio_chip",    4)
+        self.declare_parameter("pin_step",    17)
+        self.declare_parameter("pin_dir",     27)
+        self.declare_parameter("pasos_por_rev", 3200)
+        self.declare_parameter("delay_pulso",   0.0005)
 
-        self._gpio_chip:   int   = self.get_parameter("gpio_chip").get_parameter_value().integer_value
-        self._pin_step:    int   = self.get_parameter("pin_step").get_parameter_value().integer_value
-        self._pin_dir:     int   = self.get_parameter("pin_dir").get_parameter_value().integer_value
-        self._pulse_delay: float = self.get_parameter("pulse_delay").get_parameter_value().double_value
+        self._gpio_chip:     int = self.get_parameter("gpio_chip").get_parameter_value().integer_value
+        self._pin_step:      int = self.get_parameter("pin_step").get_parameter_value().integer_value
+        self._pin_dir:       int = self.get_parameter("pin_dir").get_parameter_value().integer_value
+        # pasos_por_rev y delay_pulso se leen dinámicamente en cada movimiento
+        # (ver _ejecutar_pasos) para respetar cambios hechos con ros2 param set.
 
         # ── Estado del hilo de movimiento ──────────────────────────────────
         self._hilo_motor: threading.Thread | None = None
-        self._cancelar   = threading.Event()   # set() → aborta el bucle de pasos
-        self._lock       = threading.Lock()    # serializa acceso al hilo
+        self._cancelar   = threading.Event()
+        self._lock       = threading.Lock()
 
         # ── QoS ───────────────────────────────────────────────────────────
         qos = QoSProfile(
@@ -93,22 +103,33 @@ class NodoActuadores(Node):
             durability=DurabilityPolicy.VOLATILE,
         )
 
-        # ── Suscripción ───────────────────────────────────────────────────
-        self._sub_cmd = self.create_subscription(
+        # ── Suscripciones ─────────────────────────────────────────────────
+        self._sub_pasos = self.create_subscription(
             Int32,
             self.TOPIC_COMANDO_MOTOR,
             self._cb_comando_motor,
             qos,
         )
 
-        # ── Inicialización GPIO (sin simulación — falla si hay error) ──────
+        self._sub_grados = self.create_subscription(
+            Float32,
+            self.TOPIC_COMANDO_GRADOS,
+            self._cb_comando_grados,
+            qos,
+        )
+
+        # ── Inicialización GPIO (sin fallback — falla con excepción real) ──
         self._h: int = self._init_gpio()
 
+        pasos_por_rev = self.get_parameter("pasos_por_rev").get_parameter_value().integer_value
+        delay_pulso   = self.get_parameter("delay_pulso").get_parameter_value().double_value
+
         self.get_logger().info(
-            f"NodoActuadores listo | gpiochip{self._gpio_chip} | "
-            f"PUL=GPIO{self._pin_step} | DIR=GPIO{self._pin_dir} | "
-            f"delay_pulso={self._pulse_delay*1000:.1f} ms | "
-            f"escuchando '{self.TOPIC_COMANDO_MOTOR}' (Int32)"
+            f"NodoActuadores listo\n"
+            f"  GPIO  : gpiochip{self._gpio_chip} | PUL=GPIO{self._pin_step} | DIR=GPIO{self._pin_dir}\n"
+            f"  Motor : {pasos_por_rev} pasos/rev | delay={delay_pulso*1000:.2f} ms/semi-ciclo\n"
+            f"  Topics: '{self.TOPIC_COMANDO_MOTOR}' (Int32 pasos directos)\n"
+            f"          '{self.TOPIC_COMANDO_GRADOS}' (Float32 grados)"
         )
 
     # ══════════════════════════════════════════════════════════════════════
@@ -117,54 +138,83 @@ class NodoActuadores(Node):
 
     def _init_gpio(self) -> int:
         """
-        Abre /dev/gpiochip4 y reclama los pines PUL y DIR como salidas.
-
-        Lanza excepción directamente si:
-            - lgpio no puede abrir el chip (permisos, chip incorrecto)
-            - el pin ya está reclamado por otro proceso
-
-        Retorna el handle lgpio (int) para usar en el resto del nodo.
+        Abre /dev/gpiochipN y reclama PUL y DIR como salidas digitales.
+        Lanza excepción lgpio directamente si hay error de permisos o chip.
         """
         handle = lgpio.gpiochip_open(self._gpio_chip)
-
-        # Reclama PUL+ como salida, estado inicial LOW
         lgpio.gpio_claim_output(handle, self._pin_step, 0)
-
-        # Reclama DIR+ como salida, estado inicial LOW (CCW)
-        lgpio.gpio_claim_output(handle, self._pin_dir, 0)
-
+        lgpio.gpio_claim_output(handle, self._pin_dir,  0)
         self.get_logger().info(
             f"GPIO OK → /dev/gpiochip{self._gpio_chip} | "
-            f"PUL=GPIO{self._pin_step} DIR=GPIO{self._pin_dir} reclamados como salida"
+            f"PUL=GPIO{self._pin_step} DIR=GPIO{self._pin_dir}"
         )
         return handle
 
     # ══════════════════════════════════════════════════════════════════════
-    # Callback del tópico /comando_motor
+    # Callbacks de suscripción
     # ══════════════════════════════════════════════════════════════════════
 
     def _cb_comando_motor(self, msg: Int32) -> None:
         """
-        Recibe un entero e inicia el movimiento correspondiente.
+        Recibe pasos directos (Int32) y lanza el movimiento.
 
-        Flujo:
-            1. Si hay un movimiento en curso, lo cancela y espera a que termine.
-            2. Si el comando es 0, solo cancela (sin nuevo movimiento).
-            3. Lanza un hilo daemon que ejecuta el tren de pulsos.
+        +N → N pasos CW
+        -N → N pasos CCW
+         0 → detener movimiento en curso
         """
         pasos = msg.data
         self.get_logger().info(
-            f"Comando recibido: {pasos:+d} pasos "
-            f"({'CW' if pasos > 0 else 'CCW' if pasos < 0 else 'STOP'})"
+            f"[/comando_motor] {pasos:+d} pasos directos"
+        )
+        self._lanzar_movimiento(pasos)
+
+    def _cb_comando_grados(self, msg: Float32) -> None:
+        """
+        Recibe un ángulo en grados (Float32), lo convierte a pasos y lanza
+        el movimiento usando el mismo hilo daemon que /comando_motor.
+
+        Conversión:
+            pasos = int(round((grados / 360.0) * pasos_por_rev))
+
+        Ejemplos con pasos_por_rev=3200:
+            +90.0°  →  +800 pasos  (CW)
+            -45.5°  →  -404 pasos  (CCW)
+            +360.0° → +3200 pasos  (1 vuelta completa CW)
+               0.0° →    0 pasos   (stop)
+        """
+        grados = msg.data
+        pasos_por_rev: int = (
+            self.get_parameter("pasos_por_rev").get_parameter_value().integer_value
         )
 
-        # Cancela el movimiento activo (si lo hay)
+        pasos = int(round((grados / 360.0) * pasos_por_rev))
+
+        self.get_logger().info(
+            f"[/comando_grados] {grados:+.2f}° → {pasos:+d} pasos "
+            f"(pasos_por_rev={pasos_por_rev})"
+        )
+        self._lanzar_movimiento(pasos)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Punto de entrada común para ambos tópicos
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _lanzar_movimiento(self, pasos: int) -> None:
+        """
+        Cancela el movimiento en curso (si existe) y lanza uno nuevo en un
+        hilo daemon separado.
+
+        Garantías:
+            - Nunca hay dos hilos de motor corriendo al mismo tiempo.
+            - El hilo anterior siempre termina antes de empezar el nuevo.
+            - Si pasos==0, solo cancela sin iniciar nada.
+        """
         self._cancelar_movimiento_actual()
 
         if pasos == 0:
-            return  # solo era un stop
+            self.get_logger().info("Comando 0 recibido — motor detenido.")
+            return
 
-        # Limpia el flag de cancelación y lanza el nuevo hilo
         with self._lock:
             self._cancelar.clear()
             self._hilo_motor = threading.Thread(
@@ -176,79 +226,77 @@ class NodoActuadores(Node):
             self._hilo_motor.start()
 
     # ══════════════════════════════════════════════════════════════════════
-    # Lógica de movimiento (hilo separado)
+    # Bucle de pulsos (hilo daemon)
     # ══════════════════════════════════════════════════════════════════════
 
     def _ejecutar_pasos(self, pasos: int) -> None:
         """
-        Genera exactamente abs(pasos) pulsos en el pin PUL.
+        Genera exactamente abs(pasos) pulsos STEP respetando la dirección.
 
-        Cada pulso:
-            1. PUL → HIGH
-            2. time.sleep(pulse_delay)   ← semiciclo HIGH
-            3. PUL → LOW
-            4. time.sleep(pulse_delay)   ← semiciclo LOW
+        El parámetro 'delay_pulso' se lee al inicio de cada movimiento, de
+        modo que un `ros2 param set /nodo_actuadores delay_pulso X` surte
+        efecto en el próximo comando sin reiniciar el nodo.
 
-        La dirección se establece una sola vez antes del bucle y no cambia
-        durante el movimiento (requisito del TB6600).
-
-        El bucle se puede interrumpir en cualquier momento poniendo
-        self._cancelar para que el sistema responda a nuevos comandos.
+        Estructura de cada pulso:
+            PUL → HIGH  ──── delay_pulso ────  PUL → LOW  ──── delay_pulso ────
+            |←──────────────── 1 ciclo completo ───────────────────────────────→|
         """
         n_pasos    = abs(pasos)
         direccion  = _DIR_CW if pasos > 0 else _DIR_CCW
-        dir_str    = "CW  (+)" if pasos > 0 else "CCW (-)"
+        dir_str    = "CW (+)" if pasos > 0 else "CCW (-)"
 
-        # ── Establece la dirección antes de los pulsos ─────────────────
+        # Lee delay_pulso en el momento de inicio (recoge ros2 param set)
+        delay: float = (
+            self.get_parameter("delay_pulso").get_parameter_value().double_value
+        )
+        periodo_ms = delay * 2 * 1000   # periodo completo en ms (solo para log)
+        tiempo_total_s = n_pasos * delay * 2
+
+        # ── Fija la dirección y da tiempo de setup al TB6600 ──────────────
         lgpio.gpio_write(self._h, self._pin_dir, direccion)
-        # Pequeño settle para que el TB6600 reconozca el cambio de DIR
-        time.sleep(0.005)
+        time.sleep(0.005)   # 5 ms de settle para el TB6600 tras cambio de DIR
 
         self.get_logger().info(
-            f"Iniciando {n_pasos} pasos | DIR={dir_str} | "
-            f"delay={self._pulse_delay*1000:.1f} ms/semiciclo | "
-            f"tiempo estimado={n_pasos * self._pulse_delay * 2:.2f} s"
+            f"Movimiento iniciado | {dir_str} | {n_pasos} pasos | "
+            f"delay={delay*1000:.2f} ms/semi-ciclo | periodo={periodo_ms:.2f} ms | "
+            f"tiempo estimado={tiempo_total_s:.2f} s"
         )
 
-        pasos_completados = 0
+        pasos_hechos = 0
 
         for _ in range(n_pasos):
 
-            # ── Comprueba si se pidió cancelar ────────────────────────
+            # Comprueba cancelación antes de cada pulso
             if self._cancelar.is_set():
                 self.get_logger().info(
-                    f"Movimiento CANCELADO en paso {pasos_completados}/{n_pasos}"
+                    f"Movimiento CANCELADO en paso {pasos_hechos}/{n_pasos}"
                 )
                 break
 
-            # ── Pulso STEP ────────────────────────────────────────────
+            # ── Pulso STEP ────────────────────────────────────────────────
             lgpio.gpio_write(self._h, self._pin_step, 1)   # flanco de subida
-            time.sleep(self._pulse_delay)                   # HIGH durante delay
+            time.sleep(delay)                               # HIGH durante delay
             lgpio.gpio_write(self._h, self._pin_step, 0)   # flanco de bajada
-            time.sleep(self._pulse_delay)                   # LOW durante delay
+            time.sleep(delay)                               # LOW durante delay
 
-            pasos_completados += 1
+            pasos_hechos += 1
 
         else:
-            # El bucle for llegó hasta el final sin cancelación
+            # Bucle completado sin cancelación
             self.get_logger().info(
-                f"Movimiento COMPLETADO: {pasos_completados}/{n_pasos} pasos | "
-                f"DIR={dir_str}"
+                f"Movimiento COMPLETADO | {pasos_hechos}/{n_pasos} pasos | {dir_str}"
             )
 
-        # Garantiza que PUL quede en LOW al terminar (sea por fin o cancelación)
+        # Garantiza que PUL quede en LOW al terminar
         lgpio.gpio_write(self._h, self._pin_step, 0)
 
     # ══════════════════════════════════════════════════════════════════════
-    # Helpers de control de hilo
+    # Control del hilo
     # ══════════════════════════════════════════════════════════════════════
 
     def _cancelar_movimiento_actual(self) -> None:
         """
         Señala cancelación y espera hasta 3 s a que el hilo de motor termine.
-
-        timeout=3 s cubre el peor caso: pulse_delay=0.002 s × ~1500 pasos
-        antes de que el flag sea revisado.
         """
         self._cancelar.set()
         with self._lock:
@@ -256,8 +304,7 @@ class NodoActuadores(Node):
                 self._hilo_motor.join(timeout=3.0)
                 if self._hilo_motor.is_alive():
                     self.get_logger().warning(
-                        "El hilo de motor no terminó en 3 s — "
-                        "puede haber un problema de bloqueo."
+                        "Advertencia: el hilo de motor no terminó en 3 s."
                     )
 
     # ══════════════════════════════════════════════════════════════════════
@@ -265,12 +312,9 @@ class NodoActuadores(Node):
     # ══════════════════════════════════════════════════════════════════════
 
     def destroy_node(self) -> None:
-        """Cancela el movimiento activo, lleva los pines a LOW y cierra el chip."""
-        self.get_logger().info("NodoActuadores: apagando — deteniendo motor.")
-
+        """Detiene el motor, lleva los pines a LOW y cierra el chip GPIO."""
+        self.get_logger().info("NodoActuadores: apagando — cancelando movimiento.")
         self._cancelar_movimiento_actual()
-
-        # Deja ambos pines en LOW antes de cerrar
         try:
             lgpio.gpio_write(self._h, self._pin_step, 0)
             lgpio.gpio_write(self._h, self._pin_dir,  0)
@@ -278,7 +322,6 @@ class NodoActuadores(Node):
             self.get_logger().info("GPIO liberado correctamente.")
         except Exception as exc:
             self.get_logger().error(f"Error al cerrar GPIO: {exc}")
-
         super().destroy_node()
 
 
