@@ -13,7 +13,7 @@ Resiliencia:
 import cv2
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32
 from cv_bridge import CvBridge
@@ -35,7 +35,7 @@ class NodoCamara(Node):
     def __init__(self) -> None:
         super().__init__("nodo_camara")
         self._bridge  = CvBridge()
-        self._pub     = self.create_publisher(Image, "/camara/video_raw", QOS_VIDEO)
+        self._pub     = self.create_publisher(Image, "/camara/video_raw", qos_profile_sensor_data)
         self._pub_deteccion = self.create_publisher(Bool, "/botella_detectada", 10)
         self._pub_tamano = self.create_publisher(Float32, "/tamano_estimado", 10)
 

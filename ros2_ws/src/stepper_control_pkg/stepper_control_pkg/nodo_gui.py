@@ -36,7 +36,7 @@ import time
 import rclpy
 import rclpy.executors
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy, qos_profile_sensor_data
 from std_msgs.msg import Float32, Bool
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
@@ -88,11 +88,12 @@ class NodoGUI(Node):
         self._fn_lock = threading.Lock()
 
         self._sub_cam = self.create_subscription(
-            Image, self.TOPIC_CAM, self._cb_camara, QOS_VIDEO
+            Image, self.TOPIC_CAM, self._cb_camara, qos_profile_sensor_data
         )
 
-        # Lógica Autónoma del Motor
-        self._ultimo_tiempo_motor = 0.0
+        # Lógica Autónoma del Motor (Cerrojo)
+        self._botella_en_banda = False
+        self._tiempo_sin_botella = None
         self._sub_botella = self.create_subscription(
             Bool, "/botella_detectada", self._cb_botella_detectada, 10
         )
@@ -103,13 +104,25 @@ class NodoGUI(Node):
         )
 
     def _cb_botella_detectada(self, msg: Bool) -> None:
-        """Logica autonoma: si detecta botella (cooldown 5s), mueve el motor."""
+        """Logica autonoma: cerrojo de estado para evitar multi-disparos por la misma botella."""
         if msg.data:
-            tiempo_actual = time.time()
-            if tiempo_actual - self._ultimo_tiempo_motor > 5.0:
-                self.get_logger().info("Botella detectada: publicando 90.0° automáticamente.")
+            # Botella detectada: cancela cualquier temporizador de reseteo
+            self._tiempo_sin_botella = None
+            if not self._botella_en_banda:
+                self.get_logger().info("Nueva botella: publicando 90.0° automáticamente y cerrando cerrojo.")
                 self.publicar_grados(90.0)
-                self._ultimo_tiempo_motor = tiempo_actual
+                self._botella_en_banda = True
+        else:
+            # No hay botella
+            if self._botella_en_banda:
+                if self._tiempo_sin_botella is None:
+                    # Inicia el temporizador de reseteo
+                    self._tiempo_sin_botella = time.time()
+                elif time.time() - self._tiempo_sin_botella >= 1.0:
+                    # Pasó 1 segundo continuo sin botella -> liberar cerrojo
+                    self.get_logger().info("Banda libre por 1s: cerrojo liberado.")
+                    self._botella_en_banda = False
+                    self._tiempo_sin_botella = None
 
     def registrar_callback_frame(self, fn: callable) -> None:
         """Registra la funcion que recibe QImage. Llamar ANTES de spin."""
