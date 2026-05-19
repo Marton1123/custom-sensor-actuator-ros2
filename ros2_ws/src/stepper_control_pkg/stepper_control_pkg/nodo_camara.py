@@ -54,6 +54,8 @@ class NodoCamara(Node):
             self.model = None
 
         self._fallos_consecutivos = 0
+        self._frame_count = 0
+        self._ultima_caja = None
         self._captura = self._abrir_camara()
         self._timer   = self.create_timer(TIMER_PERIOD, self._publicar_frame)
 
@@ -113,51 +115,59 @@ class NodoCamara(Node):
 
         # Frame capturado con exito — resetear contador
         self._fallos_consecutivos = 0
+        self._frame_count += 1
 
-        # --- INFERENCIA YOLO ---
-        if self.model is not None:
-            # Filtrar exclusivamente clase 39 ('bottle' en COCO)
-            results = self.model(frame, classes=[39], verbose=False)
+        # --- FRAME SKIPPING ---
+        if self._frame_count % 5 == 1 or self._ultima_caja is None:
+            # --- INFERENCIA YOLO ---
+            if self.model is not None:
+                # Filtrar exclusivamente clase 39 ('bottle' en COCO)
+                results = self.model(frame, classes=[39], verbose=False)
+            else:
+                results = []
+
+            detectado = False
+            tamano = 0.0
+            mejor_conf = 0.0
+            mejor_area_pix = 0.0
+
+            if len(results) > 0 and len(results[0].boxes) > 0:
+                for box in results[0].boxes:
+                    conf = float(box.conf[0])
+                    if conf < self.conf_threshold:
+                        continue
+                    w = float(box.xywh[0][2])
+                    h = float(box.xywh[0][3])
+                    area_pix = w * h
+
+                    if conf > mejor_conf:
+                        mejor_conf = conf
+                        mejor_area_pix = area_pix
+
+            if mejor_conf >= self.conf_threshold:
+                detectado = True
+                tamano = mejor_area_pix * self.k_area
+
+            # Publicar estado de deteccion
+            msg_det = Bool()
+            msg_det.data = detectado
+            self._pub_deteccion.publish(msg_det)
+
+            if detectado:
+                msg_tam = Float32()
+                msg_tam.data = float(tamano)
+                self._pub_tamano.publish(msg_tam)
+
+            # Dibujar cajas de colision (plot devuelve un ndarray BGR)
+            if len(results) > 0:
+                annotated_frame = results[0].plot()
+            else:
+                annotated_frame = frame
+            
+            self._ultima_caja = annotated_frame
         else:
-            results = []
-
-        detectado = False
-        tamano = 0.0
-        mejor_conf = 0.0
-        mejor_area_pix = 0.0
-
-        if len(results) > 0 and len(results[0].boxes) > 0:
-            for box in results[0].boxes:
-                conf = float(box.conf[0])
-                if conf < self.conf_threshold:
-                    continue
-                w = float(box.xywh[0][2])
-                h = float(box.xywh[0][3])
-                area_pix = w * h
-
-                if conf > mejor_conf:
-                    mejor_conf = conf
-                    mejor_area_pix = area_pix
-
-        if mejor_conf >= self.conf_threshold:
-            detectado = True
-            tamano = mejor_area_pix * self.k_area
-
-        # Publicar estado de deteccion
-        msg_det = Bool()
-        msg_det.data = detectado
-        self._pub_deteccion.publish(msg_det)
-
-        if detectado:
-            msg_tam = Float32()
-            msg_tam.data = float(tamano)
-            self._pub_tamano.publish(msg_tam)
-
-        # Dibujar cajas de colision (plot devuelve un ndarray BGR)
-        if len(results) > 0:
-            annotated_frame = results[0].plot()
-        else:
-            annotated_frame = frame
+            # Reutilizar el ultimo frame procesado
+            annotated_frame = self._ultima_caja
 
         try:
             msg = self._bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")

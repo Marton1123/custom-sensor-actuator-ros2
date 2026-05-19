@@ -36,7 +36,7 @@ import rclpy
 import rclpy.executors
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, Bool
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 
@@ -89,10 +89,27 @@ class NodoGUI(Node):
         self._sub_cam = self.create_subscription(
             Image, self.TOPIC_CAM, self._cb_camara, QOS_VIDEO
         )
+
+        # Lógica Autónoma del Motor
+        self._botella_procesada = False
+        self._sub_botella = self.create_subscription(
+            Bool, "/botella_detectada", self._cb_botella_detectada, 10
+        )
+
         self.get_logger().info(
             f"NodoGUI listo | publica '{self.TOPIC_CMD}' | "
-            f"suscrito a '{self.TOPIC_CAM}'"
+            f"suscrito a '{self.TOPIC_CAM}' y '/botella_detectada'"
         )
+
+    def _cb_botella_detectada(self, msg: Bool) -> None:
+        """Logica autonoma: si detecta botella y no ha sido procesada, mueve el motor."""
+        if msg.data:
+            if not self._botella_procesada:
+                self.get_logger().info("Botella detectada: publicando 90.0° automáticamente.")
+                self.publicar_grados(90.0)
+                self._botella_procesada = True
+        else:
+            self._botella_procesada = False
 
     def registrar_callback_frame(self, fn: callable) -> None:
         """Registra la funcion que recibe QImage. Llamar ANTES de spin."""
