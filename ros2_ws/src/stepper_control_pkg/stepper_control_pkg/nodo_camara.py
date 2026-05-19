@@ -179,6 +179,7 @@ class NodoCamara(Node):
                     ancho = x2 - x1
                     alto = y2 - y1
                     area = ancho * alto
+                    self.get_logger().info(f'[CALIBRACION] Area detectada: {area} px')
                     tamano_str = "grande" if area > 100000 else "chica"
                     
                     # Recorte Central (Core ROI) para ignorar bordes curvos
