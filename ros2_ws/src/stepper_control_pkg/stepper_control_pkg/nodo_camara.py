@@ -67,6 +67,7 @@ class NodoCamara(Node):
         if cap.isOpened():
             cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             self._fallos_consecutivos = 0
             self.get_logger().info(
                 f"Camara abierta /dev/video{DEVICE_INDEX} "

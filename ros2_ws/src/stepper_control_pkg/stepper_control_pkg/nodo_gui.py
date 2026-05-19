@@ -31,6 +31,7 @@ Orden de inicializacion (critico para evitar race condition):
 import subprocess
 import sys
 import threading
+import time
 
 import rclpy
 import rclpy.executors
@@ -91,7 +92,7 @@ class NodoGUI(Node):
         )
 
         # Lógica Autónoma del Motor
-        self._botella_procesada = False
+        self._ultimo_tiempo_motor = 0.0
         self._sub_botella = self.create_subscription(
             Bool, "/botella_detectada", self._cb_botella_detectada, 10
         )
@@ -102,14 +103,13 @@ class NodoGUI(Node):
         )
 
     def _cb_botella_detectada(self, msg: Bool) -> None:
-        """Logica autonoma: si detecta botella y no ha sido procesada, mueve el motor."""
+        """Logica autonoma: si detecta botella (cooldown 5s), mueve el motor."""
         if msg.data:
-            if not self._botella_procesada:
+            tiempo_actual = time.time()
+            if tiempo_actual - self._ultimo_tiempo_motor > 5.0:
                 self.get_logger().info("Botella detectada: publicando 90.0° automáticamente.")
                 self.publicar_grados(90.0)
-                self._botella_procesada = True
-        else:
-            self._botella_procesada = False
+                self._ultimo_tiempo_motor = tiempo_actual
 
     def registrar_callback_frame(self, fn: callable) -> None:
         """Registra la funcion que recibe QImage. Llamar ANTES de spin."""
