@@ -40,16 +40,18 @@ class NodoCamara(Node):
         self._pub_tamano = self.create_publisher(Float32, "/tamano_estimado", 10)
 
         # Parametros de IA (YOLO)
-        self.declare_parameter("modelo_ncnn", "/home/lab-ros/modelos/best_ncnn_model")
         self.declare_parameter("k_area", 0.05)
         self.declare_parameter("conf_threshold", 0.70)
         
-        self.modelo_path = str(self.get_parameter("modelo_ncnn").value)
         self.k_area = float(self.get_parameter("k_area").value)
         self.conf_threshold = float(self.get_parameter("conf_threshold").value)
 
-        self.get_logger().info(f"Cargando modelo YOLO/NCNN: {self.modelo_path}")
-        self.model = YOLO(self.modelo_path, task="detect")
+        self.get_logger().info("Descargando/Cargando modelo YOLOv8 Nano pre-entrenado...")
+        try:
+            self.model = YOLO("yolov8n.pt")
+        except Exception as e:
+            self.get_logger().error(f"Error cargando YOLO: {e}")
+            self.model = None
 
         self._fallos_consecutivos = 0
         self._captura = self._abrir_camara()
@@ -113,7 +115,11 @@ class NodoCamara(Node):
         self._fallos_consecutivos = 0
 
         # --- INFERENCIA YOLO ---
-        results = self.model(frame, verbose=False)
+        if self.model is not None:
+            # Filtrar exclusivamente clase 39 ('bottle' en COCO)
+            results = self.model(frame, classes=[39], verbose=False)
+        else:
+            results = []
 
         detectado = False
         tamano = 0.0
