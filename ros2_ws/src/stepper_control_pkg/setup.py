@@ -30,8 +30,8 @@ setup(
             # Formato:  "nombre_ejecutable = paquete.modulo:funcion_main"
             "nodo_sensores   = stepper_control_pkg.nodo_sensores:main",
             "nodo_actuadores = stepper_control_pkg.nodo_actuadores:main",
+            "nodo_camara     = stepper_control_pkg.nodo_camara:main",
             "nodo_gui        = stepper_control_pkg.nodo_gui:main",
-            "nodo_vision     = stepper_control_pkg.nodo_vision:main",
         ],
     },
 )

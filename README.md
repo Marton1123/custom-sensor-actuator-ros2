@@ -78,7 +78,7 @@ Todo el flujo de dataset/entrenamiento ocurre en tu PC local. La Raspberry Pi so
 ```bash
 pip install opencv-python ultralytics roboflow
 
-python scripts/dataset_pipeline.py run ^
+python IA/dataset_and_training/dataset_pipeline.py run ^
   --duration 180 ^
   --out-root .\dataset_work ^
   --upload ^
@@ -96,7 +96,7 @@ Este comando:
 ### 2) Entrenamiento + exportacion NCNN INT8 (PC)
 
 ```bash
-python scripts/train_and_export.py \
+python IA/dataset_and_training/train_and_export.py \
   --roboflow-api-key TU_KEY \
   --roboflow-workspace TU_WORKSPACE \
   --roboflow-project TU_PROYECTO \

@@ -52,7 +52,7 @@ def generate_launch_description() -> LaunchDescription:
     )
 
     nodo_vision = Node(
-        package="stepper_control_pkg",
+        package="ros2_vision_pkg",
         executable="nodo_vision",
         name="nodo_vision",
         output="screen",
