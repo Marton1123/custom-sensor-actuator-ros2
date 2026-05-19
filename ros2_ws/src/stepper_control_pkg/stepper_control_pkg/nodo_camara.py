@@ -15,7 +15,9 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
+from std_msgs.msg import Bool, Float32
 from cv_bridge import CvBridge
+from ultralytics import YOLO
 
 QOS_VIDEO = QoSProfile(
     depth=1,
@@ -34,6 +36,21 @@ class NodoCamara(Node):
         super().__init__("nodo_camara")
         self._bridge  = CvBridge()
         self._pub     = self.create_publisher(Image, "/camara/video_raw", QOS_VIDEO)
+        self._pub_deteccion = self.create_publisher(Bool, "/botella_detectada", 10)
+        self._pub_tamano = self.create_publisher(Float32, "/tamano_estimado", 10)
+
+        # Parametros de IA (YOLO)
+        self.declare_parameter("modelo_ncnn", "/home/lab-ros/modelos/best_ncnn_model")
+        self.declare_parameter("k_area", 0.05)
+        self.declare_parameter("conf_threshold", 0.70)
+        
+        self.modelo_path = str(self.get_parameter("modelo_ncnn").value)
+        self.k_area = float(self.get_parameter("k_area").value)
+        self.conf_threshold = float(self.get_parameter("conf_threshold").value)
+
+        self.get_logger().info(f"Cargando modelo YOLO/NCNN: {self.modelo_path}")
+        self.model = YOLO(self.modelo_path, task="detect")
+
         self._fallos_consecutivos = 0
         self._captura = self._abrir_camara()
         self._timer   = self.create_timer(TIMER_PERIOD, self._publicar_frame)
@@ -95,8 +112,49 @@ class NodoCamara(Node):
         # Frame capturado con exito — resetear contador
         self._fallos_consecutivos = 0
 
+        # --- INFERENCIA YOLO ---
+        results = self.model(frame, verbose=False)
+
+        detectado = False
+        tamano = 0.0
+        mejor_conf = 0.0
+        mejor_area_pix = 0.0
+
+        if len(results) > 0 and len(results[0].boxes) > 0:
+            for box in results[0].boxes:
+                conf = float(box.conf[0])
+                if conf < self.conf_threshold:
+                    continue
+                w = float(box.xywh[0][2])
+                h = float(box.xywh[0][3])
+                area_pix = w * h
+
+                if conf > mejor_conf:
+                    mejor_conf = conf
+                    mejor_area_pix = area_pix
+
+        if mejor_conf >= self.conf_threshold:
+            detectado = True
+            tamano = mejor_area_pix * self.k_area
+
+        # Publicar estado de deteccion
+        msg_det = Bool()
+        msg_det.data = detectado
+        self._pub_deteccion.publish(msg_det)
+
+        if detectado:
+            msg_tam = Float32()
+            msg_tam.data = float(tamano)
+            self._pub_tamano.publish(msg_tam)
+
+        # Dibujar cajas de colision (plot devuelve un ndarray BGR)
+        if len(results) > 0:
+            annotated_frame = results[0].plot()
+        else:
+            annotated_frame = frame
+
         try:
-            msg = self._bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+            msg = self._bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
             msg.header.stamp    = self.get_clock().now().to_msg()
             msg.header.frame_id = "camara_logitech_c270"
             self._pub.publish(msg)
