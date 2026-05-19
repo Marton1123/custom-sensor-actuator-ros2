@@ -12,6 +12,7 @@ Resiliencia:
 
 import cv2
 import rclpy
+import threading
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import Image
@@ -56,8 +57,25 @@ class NodoCamara(Node):
         self._fallos_consecutivos = 0
         self._frame_count = 0
         self._ultima_caja = None
+        self._ultimo_frame = None
         self._captura = self._abrir_camara()
+        
+        # Hilo de lectura asincrona
+        threading.Thread(target=self._leer_camara_continuamente, daemon=True).start()
+
         self._timer   = self.create_timer(TIMER_PERIOD, self._publicar_frame)
+
+    # ── Hilo de Lectura ───────────────────────────────────────────────────
+
+    def _leer_camara_continuamente(self) -> None:
+        """Lee continuamente de la camara para mantener vacio el buffer V4L2."""
+        while rclpy.ok():
+            if self._captura is not None and self._captura.isOpened():
+                ret, frame = self._captura.read()
+                if ret:
+                    self._ultimo_frame = frame
+                else:
+                    self._ultimo_frame = None
 
     # ── Apertura / reapertura de camara ───────────────────────────────────
 
@@ -96,8 +114,8 @@ class NodoCamara(Node):
                 self._captura = self._abrir_camara()
             return
 
-        ret, frame = self._captura.read()
-        if not ret or frame is None:
+        frame = self._ultimo_frame
+        if frame is None:
             self._fallos_consecutivos += 1
             if self._fallos_consecutivos == 1:
                 # Primer fallo: loguear sin once=True para detectar desconexiones

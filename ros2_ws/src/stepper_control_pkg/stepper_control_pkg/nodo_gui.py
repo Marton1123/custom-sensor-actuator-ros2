@@ -118,9 +118,9 @@ class NodoGUI(Node):
                 if self._tiempo_sin_botella is None:
                     # Inicia el temporizador de reseteo
                     self._tiempo_sin_botella = time.time()
-                elif time.time() - self._tiempo_sin_botella >= 1.0:
-                    # Pasó 1 segundo continuo sin botella -> liberar cerrojo
-                    self.get_logger().info("Banda libre por 1s: cerrojo liberado.")
+                elif time.time() - self._tiempo_sin_botella >= 4.0:
+                    # Pasó 4 segundos continuos sin botella -> liberar cerrojo
+                    self.get_logger().info("Banda libre por 4s: cerrojo liberado.")
                     self._botella_en_banda = False
                     self._tiempo_sin_botella = None
 
