@@ -432,15 +432,15 @@ class VentanaPrincipal(QMainWindow):
         QTimer.singleShot(3000, self._mostrar_resultado)
         
     def _mostrar_resultado(self) -> None:
+        tamano = "Grande" if "grande" in self._resultado_pendiente else "Chica"
         if "limpia" in self._resultado_pendiente:
-            tamano = "Grande" if "grande" in self._resultado_pendiente else "Chica"
             self._lbl_camara.setStyleSheet("background-color: #004400; color: #00FF00; font-size: 30px;")
             self._lbl_camara.setText(f"Botella {tamano} Limpia.\n\n¡Reciclaje Exitoso!")
             QApplication.beep()
             self._enviar(90.0)
         else:
             self._lbl_camara.setStyleSheet("background-color: #440000; color: #FF0000; font-size: 30px;")
-            self._lbl_camara.setText("Botella Sucia.\n\nPerdon, no podemos reciclar.")
+            self._lbl_camara.setText(f"Botella {tamano} Sucia.\n\nPerdon, no podemos reciclar.")
             QApplication.beep()
             
         self._estado = "RESULTADO"

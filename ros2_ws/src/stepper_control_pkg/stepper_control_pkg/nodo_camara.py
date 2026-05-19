@@ -176,16 +176,25 @@ class NodoCamara(Node):
                 
                 if roi.size > 0:
                     # Tamaño
+                    ancho = x2 - x1
                     alto = y2 - y1
                     tamano_str = "grande" if alto > 450 else "chica"
                     
-                    # Suciedad (Contraste/StdDev y Brillo)
-                    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                    std_dev = np.std(gray_roi)
-                    brillo = np.mean(gray_roi)
+                    # Recorte Central (Core ROI) para ignorar bordes curvos
+                    margen_x = int(ancho * 0.20)
+                    margen_y = int(alto * 0.20)
+                    roi_core = frame[y1+margen_y : y2-margen_y, x1+margen_x : x2-margen_x]
                     
-                    # Umbral compuesto de ruido/contraste y oscuridad para suciedad
-                    estado_str = "sucia" if std_dev > 60.0 or brillo < 90.0 else "limpia"
+                    if roi_core.size == 0:
+                        estado_str = "limpia"
+                    else:
+                        # Suciedad (Contraste/StdDev y Brillo) sobre núcleo
+                        gray_roi = cv2.cvtColor(roi_core, cv2.COLOR_BGR2GRAY)
+                        std_dev = np.std(gray_roi)
+                        brillo = np.mean(gray_roi)
+                        
+                        # Umbral compuesto de ruido/contraste y oscuridad para suciedad
+                        estado_str = "sucia" if std_dev > 60.0 or brillo < 90.0 else "limpia"
                     
                     resultado = f"{estado_str}_{tamano_str}"
                     
