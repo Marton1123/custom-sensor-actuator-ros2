@@ -75,6 +75,7 @@ class NodoCamara(Node):
                 ret, frame = self._captura.read()
                 with self._lock:
                     if ret:
+                        frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
                         self._ultimo_frame = frame.copy()
                     else:
                         self._ultimo_frame = None
@@ -176,7 +177,7 @@ class NodoCamara(Node):
                 if roi.size > 0:
                     # Tamaño
                     alto = y2 - y1
-                    tamano_str = "grande" if alto > 380 else "chica"
+                    tamano_str = "grande" if alto > 450 else "chica"
                     
                     # Suciedad (Contraste/StdDev y Brillo)
                     gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)

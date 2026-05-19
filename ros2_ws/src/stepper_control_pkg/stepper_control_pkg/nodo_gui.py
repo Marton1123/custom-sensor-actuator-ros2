@@ -333,8 +333,7 @@ class VentanaPrincipal(QMainWindow):
             "[ Esperando botella... ]"
         )
         lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        lbl.setMinimumHeight(120)
-        lbl.setMaximumHeight(350)
+        lbl.setMinimumHeight(300)
         self._lbl_camara = lbl
         return lbl
 
