@@ -300,7 +300,9 @@ class VentanaPrincipal(QMainWindow):
         nodo.registrar_callback_frame(self.senal_frame_nuevo.emit)
         nodo.registrar_callback_estado(self.senal_analisis.emit)
 
-        self._estado = "IDLE"
+        self._flujo_activo = False
+        self._esperando_retiro = False
+        self._tiempo_vacio_inicio = 0.0
 
         self.showFullScreen()
 
@@ -314,6 +316,7 @@ class VentanaPrincipal(QMainWindow):
         main_layout.setSpacing(5)
 
         main_layout.addWidget(self._make_camera_label(), stretch=3)
+        main_layout.addWidget(self._make_interactive_panel())
         main_layout.addWidget(self._make_display())
         main_layout.addWidget(self._make_control_group(), stretch=2)
         main_layout.addWidget(self._hline())
@@ -345,6 +348,33 @@ class VentanaPrincipal(QMainWindow):
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter
         )
         return self._lbl_display
+
+    def _make_interactive_panel(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        self._lbl_interactivo = QLabel("Esperando botella...")
+        self._lbl_interactivo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_interactivo.setStyleSheet("font-size: 24px; font-weight: bold; color: #00FF00; background: #002200; padding: 10px; border: 2px solid #004400;")
+        
+        btn_layout = QHBoxLayout()
+        self._btn_limpia = QPushButton("LIMPIA")
+        self._btn_limpia.setStyleSheet("background-color: #00AA00; color: white; font-size: 24px; font-weight: bold; padding: 15px;")
+        self._btn_limpia.clicked.connect(self._click_limpia)
+        self._btn_limpia.hide()
+        
+        self._btn_sucia = QPushButton("SUCIA")
+        self._btn_sucia.setStyleSheet("background-color: #AA0000; color: white; font-size: 24px; font-weight: bold; padding: 15px;")
+        self._btn_sucia.clicked.connect(self._click_sucia)
+        self._btn_sucia.hide()
+        
+        btn_layout.addWidget(self._btn_limpia)
+        btn_layout.addWidget(self._btn_sucia)
+        
+        layout.addWidget(self._lbl_interactivo)
+        layout.addLayout(btn_layout)
+        return panel
 
     def _make_control_group(self) -> QGroupBox:
         group = QGroupBox(" CONTROL DE MOVIMIENTO ")
@@ -385,9 +415,6 @@ class VentanaPrincipal(QMainWindow):
         Slot Qt — ejecutado en hilo principal al llegar un frame.
         setPixmap() descarta el pixmap anterior automaticamente: sin memory leak.
         """
-        if self._estado != "IDLE":
-            return
-            
         pixmap = QPixmap.fromImage(img)
         self._lbl_camara.setPixmap(
             pixmap.scaled(
@@ -418,38 +445,47 @@ class VentanaPrincipal(QMainWindow):
         )
 
     def _procesar_analisis(self, resultado_str: str) -> None:
-        if self._estado != "IDLE":
+        if self._esperando_retiro:
+            if resultado_str == "vacio":
+                if self._tiempo_vacio_inicio == 0.0:
+                    self._tiempo_vacio_inicio = time.time()
+                elif time.time() - self._tiempo_vacio_inicio >= 2.0:
+                    # 2 segundos de vacio continuo -> Reset
+                    self._esperando_retiro = False
+                    self._flujo_activo = False
+                    self._tiempo_vacio_inicio = 0.0
+                    self._lbl_interactivo.setStyleSheet("font-size: 24px; font-weight: bold; color: #00FF00; background: #002200; padding: 10px; border: 2px solid #004400;")
+                    self._lbl_interactivo.setText("Esperando botella...")
+            else:
+                self._tiempo_vacio_inicio = 0.0
             return
-            
-        self._estado = "ANALIZANDO"
-        self._resultado_pendiente = resultado_str
-        
-        self._lbl_camara.clear()
-        self._lbl_camara.setStyleSheet("background-color: #000000; color: #FFAA00; font-size: 30px;")
-        self._lbl_camara.setText("Botella Detectada.\n\nAnalizando...")
-        
-        # Esperar 3s
-        QTimer.singleShot(3000, self._mostrar_resultado)
-        
-    def _mostrar_resultado(self) -> None:
-        tamano = "Grande" if "grande" in self._resultado_pendiente else "Chica"
-        if "limpia" in self._resultado_pendiente:
-            self._lbl_camara.setStyleSheet("background-color: #004400; color: #00FF00; font-size: 30px;")
-            self._lbl_camara.setText(f"Botella {tamano} Limpia.\n\n¡Reciclaje Exitoso!")
-            QApplication.beep()
-            self._enviar(90.0)
-        else:
-            self._lbl_camara.setStyleSheet("background-color: #440000; color: #FF0000; font-size: 30px;")
-            self._lbl_camara.setText(f"Botella {tamano} Sucia.\n\nPerdon, no podemos reciclar.")
-            QApplication.beep()
-            
-        self._estado = "RESULTADO"
-        QTimer.singleShot(4000, self._volver_idle)
-        
-    def _volver_idle(self) -> None:
-        self._estado = "IDLE"
-        self._lbl_camara.setStyleSheet("background-color: #000000; color: #004400; font-size: 14px;")
-        self._lbl_camara.setText("[ Esperando botella... ]")
+
+        if not self._flujo_activo and resultado_str in ["grande", "chica"]:
+            self._flujo_activo = True
+            tamano = "Grande" if resultado_str == "grande" else "Chica"
+            self._lbl_interactivo.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFAA00; background: #222200; padding: 10px; border: 2px solid #554400;")
+            self._lbl_interactivo.setText(f"Botella {tamano} detectada. ¿Cuál es su estado?")
+            self._btn_limpia.show()
+            self._btn_sucia.show()
+
+    def _click_limpia(self) -> None:
+        self._btn_limpia.hide()
+        self._btn_sucia.hide()
+        self._lbl_interactivo.setStyleSheet("font-size: 24px; font-weight: bold; color: #00FF00; background: #004400; padding: 10px; border: 2px solid #00AA00;")
+        self._lbl_interactivo.setText("¡Reciclaje Exitoso!")
+        QApplication.beep()
+        self._enviar(90.0)
+        self._esperando_retiro = True
+        self._tiempo_vacio_inicio = 0.0
+
+    def _click_sucia(self) -> None:
+        self._btn_limpia.hide()
+        self._btn_sucia.hide()
+        self._lbl_interactivo.setStyleSheet("font-size: 24px; font-weight: bold; color: #FF0000; background: #440000; padding: 10px; border: 2px solid #AA0000;")
+        self._lbl_interactivo.setText("Botella sucia. Por favor, retírela de la máquina.")
+        QApplication.beep()
+        self._esperando_retiro = True
+        self._tiempo_vacio_inicio = 0.0
 
     @staticmethod
     def _hline() -> QFrame:

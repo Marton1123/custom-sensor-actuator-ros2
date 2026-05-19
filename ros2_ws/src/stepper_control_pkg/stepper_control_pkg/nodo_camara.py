@@ -162,46 +162,18 @@ class NodoCamara(Node):
                         mejor_conf = conf
                         mejor_box = box
 
+            resultado = "vacio"
             if mejor_box is not None:
-                # Extraer ROI
                 xyxy = mejor_box.xyxy[0].cpu().numpy()
                 x1, y1, x2, y2 = map(int, xyxy)
-                
-                # Validar limites
-                h_img, w_img = frame.shape[:2]
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(w_img, x2), min(h_img, y2)
-                
-                roi = frame[y1:y2, x1:x2]
-                
-                if roi.size > 0:
-                    # Tamaño
-                    ancho = x2 - x1
-                    alto = y2 - y1
-                    area = ancho * alto
-                    tamano_str = "grande" if area > 33000 else "chica"
-                    
-                    # Recorte Central (Core ROI) para ignorar bordes curvos
-                    margen_x = int(ancho * 0.20)
-                    margen_y = int(alto * 0.20)
-                    roi_core = frame[y1+margen_y : y2-margen_y, x1+margen_x : x2-margen_x]
-                    
-                    if roi_core.size == 0:
-                        estado_str = "limpia"
-                    else:
-                        # Suciedad (Contraste/StdDev y Brillo) sobre núcleo
-                        gray_roi = cv2.cvtColor(roi_core, cv2.COLOR_BGR2GRAY)
-                        std_dev = np.std(gray_roi)
-                        brillo = np.mean(gray_roi)
-                        
-                        # Umbral compuesto de ruido/contraste y oscuridad para suciedad
-                        estado_str = "sucia" if std_dev > 60.0 or brillo < 90.0 else "limpia"
-                    
-                    resultado = f"{estado_str}_{tamano_str}"
-                    
-                    msg = String()
-                    msg.data = resultado
-                    self._pub_analisis.publish(msg)
+                ancho = x2 - x1
+                alto = y2 - y1
+                area = ancho * alto
+                resultado = "grande" if area > 33000 else "chica"
+
+            msg = String()
+            msg.data = resultado
+            self._pub_analisis.publish(msg)
 
             # Dibujar cajas de colision (plot devuelve un ndarray BGR)
             if len(results) > 0:
