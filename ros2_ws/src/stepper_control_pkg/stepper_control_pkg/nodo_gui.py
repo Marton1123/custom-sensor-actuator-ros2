@@ -89,7 +89,7 @@ class NodoGUI(Node):
         self._fn_lock = threading.Lock()
 
         self._sub_cam = self.create_subscription(
-            Image, self.TOPIC_CAM, self._cb_camara, qos_profile_sensor_data
+            Image, self.TOPIC_CAM, self._cb_camara, QOS_VIDEO
         )
 
         self._sub_analisis = self.create_subscription(

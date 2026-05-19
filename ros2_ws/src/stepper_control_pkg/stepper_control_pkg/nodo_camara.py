@@ -37,7 +37,7 @@ class NodoCamara(Node):
     def __init__(self) -> None:
         super().__init__("nodo_camara")
         self._bridge  = CvBridge()
-        self._pub     = self.create_publisher(Image, "/camara/video_raw", qos_profile_sensor_data)
+        self._pub     = self.create_publisher(Image, "/camara/video_raw", QOS_VIDEO)
         self._pub_analisis = self.create_publisher(String, "/analisis_botella", 10)
 
         # Parametros de IA (YOLO)
@@ -58,6 +58,7 @@ class NodoCamara(Node):
         self._frame_count = 0
         self._ultima_caja = None
         self._ultimo_frame = None
+        self._lock = threading.Lock()
         self._captura = self._abrir_camara()
         
         # Hilo de lectura asincrona
@@ -72,10 +73,11 @@ class NodoCamara(Node):
         while rclpy.ok():
             if self._captura is not None and self._captura.isOpened():
                 ret, frame = self._captura.read()
-                if ret:
-                    self._ultimo_frame = frame
-                else:
-                    self._ultimo_frame = None
+                with self._lock:
+                    if ret:
+                        self._ultimo_frame = frame.copy()
+                    else:
+                        self._ultimo_frame = None
 
     # ── Apertura / reapertura de camara ───────────────────────────────────
 
@@ -114,7 +116,9 @@ class NodoCamara(Node):
                 self._captura = self._abrir_camara()
             return
 
-        frame = self._ultimo_frame
+        with self._lock:
+            frame = self._ultimo_frame.copy() if self._ultimo_frame is not None else None
+
         if frame is None:
             self._fallos_consecutivos += 1
             if self._fallos_consecutivos == 1:
@@ -172,14 +176,15 @@ class NodoCamara(Node):
                 if roi.size > 0:
                     # Tamaño
                     alto = y2 - y1
-                    tamano_str = "grande" if alto > 250 else "chica"
+                    tamano_str = "grande" if alto > 380 else "chica"
                     
-                    # Suciedad (Contraste/StdDev)
+                    # Suciedad (Contraste/StdDev y Brillo)
                     gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
                     std_dev = np.std(gray_roi)
+                    brillo = np.mean(gray_roi)
                     
-                    # Umbral empírico de ruido/contraste para suciedad
-                    estado_str = "sucia" if std_dev > 45.0 else "limpia"
+                    # Umbral compuesto de ruido/contraste y oscuridad para suciedad
+                    estado_str = "sucia" if std_dev > 60.0 or brillo < 90.0 else "limpia"
                     
                     resultado = f"{estado_str}_{tamano_str}"
                     
