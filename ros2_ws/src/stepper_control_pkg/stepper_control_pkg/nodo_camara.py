@@ -16,9 +16,10 @@ import threading
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import Image
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import String
 from cv_bridge import CvBridge
 from ultralytics import YOLO
+import numpy as np
 
 QOS_VIDEO = QoSProfile(
     depth=1,
@@ -37,8 +38,7 @@ class NodoCamara(Node):
         super().__init__("nodo_camara")
         self._bridge  = CvBridge()
         self._pub     = self.create_publisher(Image, "/camara/video_raw", qos_profile_sensor_data)
-        self._pub_deteccion = self.create_publisher(Bool, "/botella_detectada", 10)
-        self._pub_tamano = self.create_publisher(Float32, "/tamano_estimado", 10)
+        self._pub_analisis = self.create_publisher(String, "/analisis_botella", 10)
 
         # Parametros de IA (YOLO)
         self.declare_parameter("k_area", 0.05)
@@ -145,37 +145,47 @@ class NodoCamara(Node):
             else:
                 results = []
 
-            detectado = False
-            tamano = 0.0
             mejor_conf = 0.0
-            mejor_area_pix = 0.0
+            mejor_box = None
 
             if len(results) > 0 and len(results[0].boxes) > 0:
                 for box in results[0].boxes:
                     conf = float(box.conf[0])
                     if conf < self.conf_threshold:
                         continue
-                    w = float(box.xywh[0][2])
-                    h = float(box.xywh[0][3])
-                    area_pix = w * h
-
                     if conf > mejor_conf:
                         mejor_conf = conf
-                        mejor_area_pix = area_pix
+                        mejor_box = box
 
-            if mejor_conf >= self.conf_threshold:
-                detectado = True
-                tamano = mejor_area_pix * self.k_area
-
-            # Publicar estado de deteccion
-            msg_det = Bool()
-            msg_det.data = detectado
-            self._pub_deteccion.publish(msg_det)
-
-            if detectado:
-                msg_tam = Float32()
-                msg_tam.data = float(tamano)
-                self._pub_tamano.publish(msg_tam)
+            if mejor_box is not None:
+                # Extraer ROI
+                xyxy = mejor_box.xyxy[0].cpu().numpy()
+                x1, y1, x2, y2 = map(int, xyxy)
+                
+                # Validar limites
+                h_img, w_img = frame.shape[:2]
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w_img, x2), min(h_img, y2)
+                
+                roi = frame[y1:y2, x1:x2]
+                
+                if roi.size > 0:
+                    # Tamaño
+                    alto = y2 - y1
+                    tamano_str = "grande" if alto > 250 else "chica"
+                    
+                    # Suciedad (Contraste/StdDev)
+                    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    std_dev = np.std(gray_roi)
+                    
+                    # Umbral empírico de ruido/contraste para suciedad
+                    estado_str = "sucia" if std_dev > 45.0 else "limpia"
+                    
+                    resultado = f"{estado_str}_{tamano_str}"
+                    
+                    msg = String()
+                    msg.data = resultado
+                    self._pub_analisis.publish(msg)
 
             # Dibujar cajas de colision (plot devuelve un ndarray BGR)
             if len(results) > 0:

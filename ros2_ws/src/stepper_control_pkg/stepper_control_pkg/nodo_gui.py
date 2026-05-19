@@ -37,11 +37,11 @@ import rclpy
 import rclpy.executors
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy, qos_profile_sensor_data
-from std_msgs.msg import Float32, Bool
+from std_msgs.msg import Float32, String
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer
 from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
@@ -85,44 +85,31 @@ class NodoGUI(Node):
 
         # Lock protege _fn_emit_frame entre hilo ROS y hilo Qt
         self._fn_emit_frame = None
+        self._fn_estado = None
         self._fn_lock = threading.Lock()
 
         self._sub_cam = self.create_subscription(
             Image, self.TOPIC_CAM, self._cb_camara, qos_profile_sensor_data
         )
 
-        # Lógica Autónoma del Motor (Cerrojo)
-        self._botella_en_banda = False
-        self._tiempo_sin_botella = None
-        self._sub_botella = self.create_subscription(
-            Bool, "/botella_detectada", self._cb_botella_detectada, 10
+        self._sub_analisis = self.create_subscription(
+            String, "/analisis_botella", self._cb_analisis, 10
         )
 
         self.get_logger().info(
             f"NodoGUI listo | publica '{self.TOPIC_CMD}' | "
-            f"suscrito a '{self.TOPIC_CAM}' y '/botella_detectada'"
+            f"suscrito a '{self.TOPIC_CAM}' y '/analisis_botella'"
         )
 
-    def _cb_botella_detectada(self, msg: Bool) -> None:
-        """Logica autonoma: cerrojo de estado para evitar multi-disparos por la misma botella."""
-        if msg.data:
-            # Botella detectada: cancela cualquier temporizador de reseteo
-            self._tiempo_sin_botella = None
-            if not self._botella_en_banda:
-                self.get_logger().info("Nueva botella: publicando 90.0° automáticamente y cerrando cerrojo.")
-                self.publicar_grados(90.0)
-                self._botella_en_banda = True
-        else:
-            # No hay botella
-            if self._botella_en_banda:
-                if self._tiempo_sin_botella is None:
-                    # Inicia el temporizador de reseteo
-                    self._tiempo_sin_botella = time.time()
-                elif time.time() - self._tiempo_sin_botella >= 4.0:
-                    # Pasó 4 segundos continuos sin botella -> liberar cerrojo
-                    self.get_logger().info("Banda libre por 4s: cerrojo liberado.")
-                    self._botella_en_banda = False
-                    self._tiempo_sin_botella = None
+    def _cb_analisis(self, msg: String) -> None:
+        with self._fn_lock:
+            fn = self._fn_estado
+        if fn:
+            fn(msg.data)
+
+    def registrar_callback_estado(self, fn: callable) -> None:
+        with self._fn_lock:
+            self._fn_estado = fn
 
     def registrar_callback_frame(self, fn: callable) -> None:
         """Registra la funcion que recibe QImage. Llamar ANTES de spin."""
@@ -293,6 +280,7 @@ class VentanaPrincipal(QMainWindow):
     # Senal definida a nivel de clase (requerido por PyQt6).
     # Emitida desde hilo ROS, recibida en hilo Qt (cross-thread encolado automatico).
     senal_frame_nuevo: pyqtSignal = pyqtSignal(QImage)
+    senal_analisis: pyqtSignal = pyqtSignal(str)
 
     def __init__(self, nodo: NodoGUI) -> None:
         super().__init__()
@@ -305,10 +293,14 @@ class VentanaPrincipal(QMainWindow):
 
         # Conecta la senal al slot en el hilo Qt
         self.senal_frame_nuevo.connect(self._mostrar_frame)
+        self.senal_analisis.connect(self._procesar_analisis)
 
         # Registra la emision de la senal como callback del nodo ROS.
         # DEBE ocurrir antes de hilo_ros.start() para evitar race condition.
         nodo.registrar_callback_frame(self.senal_frame_nuevo.emit)
+        nodo.registrar_callback_estado(self.senal_analisis.emit)
+
+        self._estado = "IDLE"
 
         self.showFullScreen()
 
@@ -328,8 +320,7 @@ class VentanaPrincipal(QMainWindow):
 
         fila_pie = QHBoxLayout()
         fila_pie.setSpacing(5)
-        fila_pie.addWidget(self._make_stop_button(),   stretch=2)
-        fila_pie.addWidget(self._make_apagar_button(), stretch=1)
+        fila_pie.addWidget(self._make_stop_button())
         main_layout.addLayout(fila_pie)
 
     # ── Widgets ──────────────────────────────────────────────────────────
@@ -339,9 +330,7 @@ class VentanaPrincipal(QMainWindow):
         lbl.setObjectName("lbl_camara")
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl.setText(
-            "██  CAMARA DE DETECCION  ██\n\n"
-            "[ Esperando senal de nodo_camara... ]\n\n"
-            "/camara/video_raw"
+            "[ Esperando botella... ]"
         )
         lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         lbl.setMinimumHeight(120)
@@ -382,21 +371,12 @@ class VentanaPrincipal(QMainWindow):
         return group
 
     def _make_stop_button(self) -> QPushButton:
-        btn = QPushButton("■■  PARO DE EMERGENCIA  ■■")
+        btn = QPushButton("[ PARO DE EMERGENCIA ]")
         btn.setObjectName("btn_stop")
         btn.setFixedHeight(90)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setToolTip("Envia 0 grados — detiene el motor inmediatamente")
         btn.clicked.connect(lambda: self._enviar(0.0))
-        return btn
-
-    def _make_apagar_button(self) -> QPushButton:
-        btn = QPushButton("🔌 APAGAR\nSISTEMA")
-        btn.setObjectName("btn_apagar")
-        btn.setFixedHeight(90)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setToolTip("Apaga la Raspberry Pi de forma segura")
-        btn.clicked.connect(self._apagar_sistema)
         return btn
 
     # ── Slots y logica ───────────────────────────────────────────────────
@@ -406,6 +386,9 @@ class VentanaPrincipal(QMainWindow):
         Slot Qt — ejecutado en hilo principal al llegar un frame.
         setPixmap() descarta el pixmap anterior automaticamente: sin memory leak.
         """
+        if self._estado != "IDLE":
+            return
+            
         pixmap = QPixmap.fromImage(img)
         self._lbl_camara.setPixmap(
             pixmap.scaled(
@@ -435,44 +418,39 @@ class VentanaPrincipal(QMainWindow):
             "padding:8px 16px; letter-spacing:2px;"
         )
 
-    def _apagar_sistema(self) -> None:
-        """
-        Apaga la RPi5 con confirmacion previa y feedback de error en pantalla.
-
-        Requiere en /etc/sudoers (visudo):
-            kiosco ALL=(ALL) NOPASSWD: /bin/systemctl poweroff
-        """
-        resp = QMessageBox.question(
-            self,
-            "Confirmar Apagado",
-            "¿Seguro que deseas apagar el sistema?\n\nEsta accion es irreversible.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if resp != QMessageBox.StandardButton.Yes:
+    def _procesar_analisis(self, resultado_str: str) -> None:
+        if self._estado != "IDLE":
             return
-
-        self._nodo.get_logger().info("Apagado del sistema solicitado desde GUI.")
-        try:
-            resultado = subprocess.run(
-                ["sudo", "systemctl", "poweroff"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if resultado.returncode != 0:
-                self._nodo.get_logger().error(
-                    f"poweroff fallo (returncode={resultado.returncode}): {resultado.stderr}"
-                )
-                QMessageBox.critical(
-                    self, "Error de Apagado",
-                    f"No se pudo apagar el sistema:\n{resultado.stderr}\n\n"
-                    "Verifica sudoers NOPASSWD para 'systemctl poweroff'.",
-                )
-        except Exception as exc:
-            self._nodo.get_logger().error(f"Excepcion en apagado: {exc}")
-            QMessageBox.critical(
-                self, "Error de Apagado",
-                f"Excepcion al intentar apagar:\n{exc}",
-            )
+            
+        self._estado = "ANALIZANDO"
+        self._resultado_pendiente = resultado_str
+        
+        self._lbl_camara.clear()
+        self._lbl_camara.setStyleSheet("background-color: #000000; color: #FFAA00; font-size: 30px;")
+        self._lbl_camara.setText("Botella Detectada.\n\nAnalizando...")
+        
+        # Esperar 3s
+        QTimer.singleShot(3000, self._mostrar_resultado)
+        
+    def _mostrar_resultado(self) -> None:
+        if "limpia" in self._resultado_pendiente:
+            tamano = "Grande" if "grande" in self._resultado_pendiente else "Chica"
+            self._lbl_camara.setStyleSheet("background-color: #004400; color: #00FF00; font-size: 30px;")
+            self._lbl_camara.setText(f"Botella {tamano} Limpia.\n\n¡Reciclaje Exitoso!")
+            QApplication.beep()
+            self._enviar(90.0)
+        else:
+            self._lbl_camara.setStyleSheet("background-color: #440000; color: #FF0000; font-size: 30px;")
+            self._lbl_camara.setText("Botella Sucia.\n\nPerdon, no podemos reciclar.")
+            QApplication.beep()
+            
+        self._estado = "RESULTADO"
+        QTimer.singleShot(4000, self._volver_idle)
+        
+    def _volver_idle(self) -> None:
+        self._estado = "IDLE"
+        self._lbl_camara.setStyleSheet("background-color: #000000; color: #004400; font-size: 14px;")
+        self._lbl_camara.setText("[ Esperando botella... ]")
 
     @staticmethod
     def _hline() -> QFrame:
