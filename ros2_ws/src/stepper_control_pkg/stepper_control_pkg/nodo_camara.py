@@ -178,7 +178,8 @@ class NodoCamara(Node):
                     # Tamaño
                     ancho = x2 - x1
                     alto = y2 - y1
-                    tamano_str = "grande" if alto > 450 else "chica"
+                    area = ancho * alto
+                    tamano_str = "grande" if area > 100000 else "chica"
                     
                     # Recorte Central (Core ROI) para ignorar bordes curvos
                     margen_x = int(ancho * 0.20)
