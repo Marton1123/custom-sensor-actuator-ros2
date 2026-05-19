@@ -7,7 +7,7 @@ Estetica SCADA / LabVIEW clasico anos 90.
 
 Arquitectura de hilos:
     Hilo principal → QApplication.exec()   (Qt event loop)
-    Hilo daemon    → rclpy.spin(NodoGUI)    (ROS 2: publisher + subscriber)
+    Hilo daemon    → executor.spin()        (ROS 2: publisher + subscriber)
 
 Topicos:
     Publica  → /comando_grados      (std_msgs/Float32)
@@ -17,13 +17,23 @@ Seguridad inter-hilo para la imagen:
     El callback ROS corre en el hilo daemon.
     Usamos pyqtSignal(QImage) para entregarla al hilo Qt de forma segura.
     PyQt6 encolara automaticamente la emision cuando detecte cruce de hilos.
+
+Orden de inicializacion (critico para evitar race condition):
+    1. rclpy.init() + NodoGUI()
+    2. QApplication()
+    3. VentanaPrincipal(nodo)  ← registra callback de frame
+    4. executor.spin() en hilo daemon  ← arranca DESPUES del callback
+    5. app.exec()  ← bloquea hilo principal
+    6. executor.shutdown() + hilo.join()  ← para spin limpiamente
+    7. nodo.destroy_node() + rclpy.shutdown()
 """
 
-import os
+import subprocess
 import sys
 import threading
 
 import rclpy
+import rclpy.executors
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from std_msgs.msg import Float32
@@ -36,6 +46,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QFrame, QGroupBox, QSizePolicy,
+    QMessageBox,
 )
 
 
@@ -65,47 +76,42 @@ class NodoGUI(Node):
     def __init__(self) -> None:
         super().__init__("nodo_gui")
 
-        # Publisher de comandos de motor
         qos_cmd = QoSProfile(depth=10,
                              reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.VOLATILE)
         self._pub = self.create_publisher(Float32, self.TOPIC_CMD, qos_cmd)
-
-        # CvBridge para convertir Image → ndarray
         self._bridge = CvBridge()
 
-        # Callback de frame (se asigna en registrar_callback_frame)
+        # Lock protege _fn_emit_frame entre hilo ROS y hilo Qt
         self._fn_emit_frame = None
+        self._fn_lock = threading.Lock()
 
-        # Subscriptor de video
         self._sub_cam = self.create_subscription(
             Image, self.TOPIC_CAM, self._cb_camara, QOS_VIDEO
         )
-
         self.get_logger().info(
             f"NodoGUI listo | publica '{self.TOPIC_CMD}' | "
             f"suscrito a '{self.TOPIC_CAM}'"
         )
 
     def registrar_callback_frame(self, fn: callable) -> None:
-        """
-        Registra la funcion que recibe QImage desde el hilo ROS.
-        Llamar DESPUES de crear VentanaPrincipal.
-        """
-        self._fn_emit_frame = fn
+        """Registra la funcion que recibe QImage. Llamar ANTES de spin."""
+        with self._fn_lock:
+            self._fn_emit_frame = fn
 
     def _cb_camara(self, msg: Image) -> None:
         """Convierte Image ROS a QImage y la emite via senal Qt (thread-safe)."""
-        if self._fn_emit_frame is None:
+        with self._fn_lock:
+            fn = self._fn_emit_frame
+        if fn is None:
             return
         try:
-            # bgr8 → rgb8 directo con CvBridge
             frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding="rgb8")
             h, w, ch = frame.shape
-            # .tobytes() crea copia propia → seguro cuando frame sale de scope
+            # .tobytes() crea copia propia: sin memory leak por acumulacion de frames
             img = QImage(frame.tobytes(), w, h, ch * w,
                          QImage.Format.Format_RGB888)
-            self._fn_emit_frame(img)   # emision encolada por PyQt6
+            fn(img)
         except Exception as exc:
             self.get_logger().warn(f"Error procesando frame camara: {exc}",
                                    once=True)
@@ -254,8 +260,8 @@ class VentanaPrincipal(QMainWindow):
         [btn_stop  stretch=2 | btn_apagar stretch=1]
     """
 
-    # Senal definida a nivel de clase (requerido por PyQt6)
-    # Emitida desde el hilo ROS, recibida en el hilo Qt (encolada automaticamente)
+    # Senal definida a nivel de clase (requerido por PyQt6).
+    # Emitida desde hilo ROS, recibida en hilo Qt (cross-thread encolado automatico).
     senal_frame_nuevo: pyqtSignal = pyqtSignal(QImage)
 
     def __init__(self, nodo: NodoGUI) -> None:
@@ -270,7 +276,8 @@ class VentanaPrincipal(QMainWindow):
         # Conecta la senal al slot en el hilo Qt
         self.senal_frame_nuevo.connect(self._mostrar_frame)
 
-        # Registra la emision de la senal como callback del nodo ROS
+        # Registra la emision de la senal como callback del nodo ROS.
+        # DEBE ocurrir antes de hilo_ros.start() para evitar race condition.
         nodo.registrar_callback_frame(self.senal_frame_nuevo.emit)
 
         self.showFullScreen()
@@ -284,19 +291,11 @@ class VentanaPrincipal(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(5)
 
-        # 1. Camara — empieza en y=0
         main_layout.addWidget(self._make_camera_label(), stretch=3)
-
-        # 2. Display LCD
         main_layout.addWidget(self._make_display())
-
-        # 3. Botones de movimiento
         main_layout.addWidget(self._make_control_group(), stretch=2)
-
-        # 4. Separador
         main_layout.addWidget(self._hline())
 
-        # 5. Fila inferior: PARO (izq) + APAGAR (der)
         fila_pie = QHBoxLayout()
         fila_pie.setSpacing(5)
         fila_pie.addWidget(self._make_stop_button(),   stretch=2)
@@ -306,7 +305,6 @@ class VentanaPrincipal(QMainWindow):
     # ── Widgets ──────────────────────────────────────────────────────────
 
     def _make_camera_label(self) -> QLabel:
-        """Marco negro que muestra el video de /camara/video_raw."""
         lbl = QLabel()
         lbl.setObjectName("lbl_camara")
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -363,12 +361,11 @@ class VentanaPrincipal(QMainWindow):
         return btn
 
     def _make_apagar_button(self) -> QPushButton:
-        """Boton de apagado seguro del sistema operativo."""
         btn = QPushButton("🔌 APAGAR\nSISTEMA")
         btn.setObjectName("btn_apagar")
         btn.setFixedHeight(90)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setToolTip("Apaga la Raspberry Pi de forma segura (systemctl poweroff)")
+        btn.setToolTip("Apaga la Raspberry Pi de forma segura")
         btn.clicked.connect(self._apagar_sistema)
         return btn
 
@@ -376,8 +373,8 @@ class VentanaPrincipal(QMainWindow):
 
     def _mostrar_frame(self, img: QImage) -> None:
         """
-        Slot Qt — llamado en el hilo principal cuando llega un frame.
-        Escala el QImage al tamano actual del label manteniendo aspecto.
+        Slot Qt — ejecutado en hilo principal al llegar un frame.
+        setPixmap() descarta el pixmap anterior automaticamente: sin memory leak.
         """
         pixmap = QPixmap.fromImage(img)
         self._lbl_camara.setPixmap(
@@ -389,7 +386,6 @@ class VentanaPrincipal(QMainWindow):
         )
 
     def _enviar(self, grados: float) -> None:
-        """Publica en /comando_grados y actualiza el display LCD."""
         self._nodo.publicar_grados(grados)
 
         if grados == 0.0:
@@ -410,9 +406,43 @@ class VentanaPrincipal(QMainWindow):
         )
 
     def _apagar_sistema(self) -> None:
-        """Apaga la Raspberry Pi de forma segura."""
+        """
+        Apaga la RPi5 con confirmacion previa y feedback de error en pantalla.
+
+        Requiere en /etc/sudoers (visudo):
+            kiosco ALL=(ALL) NOPASSWD: /bin/systemctl poweroff
+        """
+        resp = QMessageBox.question(
+            self,
+            "Confirmar Apagado",
+            "¿Seguro que deseas apagar el sistema?\n\nEsta accion es irreversible.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+
         self._nodo.get_logger().info("Apagado del sistema solicitado desde GUI.")
-        os.system("systemctl poweroff")
+        try:
+            resultado = subprocess.run(
+                ["sudo", "systemctl", "poweroff"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if resultado.returncode != 0:
+                self._nodo.get_logger().error(
+                    f"poweroff fallo (returncode={resultado.returncode}): {resultado.stderr}"
+                )
+                QMessageBox.critical(
+                    self, "Error de Apagado",
+                    f"No se pudo apagar el sistema:\n{resultado.stderr}\n\n"
+                    "Verifica sudoers NOPASSWD para 'systemctl poweroff'.",
+                )
+        except Exception as exc:
+            self._nodo.get_logger().error(f"Excepcion en apagado: {exc}")
+            QMessageBox.critical(
+                self, "Error de Apagado",
+                f"Excepcion al intentar apagar:\n{exc}",
+            )
 
     @staticmethod
     def _hline() -> QFrame:
@@ -431,24 +461,35 @@ class VentanaPrincipal(QMainWindow):
 # ══════════════════════════════════════════════════════════════════════════
 
 def main(args=None) -> None:
+    # 1. ROS 2
     rclpy.init(args=args)
     nodo = NodoGUI()
 
+    # 2. Qt
+    app = QApplication(sys.argv)
+    app.setStyleSheet(STYLESHEET)
+
+    # 3. Ventana — registra callback ANTES de arrancar el hilo de spin
+    ventana = VentanaPrincipal(nodo)
+
+    # 4. Spin en hilo daemon con executor controlable para shutdown limpio
+    executor = rclpy.executors.SingleThreadedExecutor()
+    executor.add_node(nodo)
     hilo_ros = threading.Thread(
-        target=rclpy.spin,
-        args=(nodo,),
+        target=executor.spin,
         daemon=True,
         name="hilo_rclpy",
     )
     hilo_ros.start()
 
-    app = QApplication(sys.argv)
-    app.setStyleSheet(STYLESHEET)
-
-    ventana = VentanaPrincipal(nodo)   # registra el callback de frame aqui
-
+    # 5. Qt event loop — bloquea hasta que la app cierre
     exit_code = app.exec()
 
+    # 6. Shutdown ordenado: señalar al executor, esperar al hilo
+    executor.shutdown(timeout_sec=2.0)
+    hilo_ros.join(timeout=3.0)
+
+    # 7. Limpiar nodo y contexto ROS
     nodo.destroy_node()
     rclpy.shutdown()
     sys.exit(exit_code)

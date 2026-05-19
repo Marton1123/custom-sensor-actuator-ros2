@@ -41,7 +41,16 @@ NOTA sobre permisos en RPi5:
 import time
 import threading
 
-import lgpio  # Falla ruidosamente si no está instalado o sin permisos → depura aquí
+# ── Importación diferida de lgpio ──────────────────────────────────────────
+# lgpio solo existe en Raspberry Pi con el paquete python3-lgpio instalado.
+# Si falta (máquina de desarrollo, instalación incompleta) se captura aquí
+# para dar un mensaje claro en lugar de un ImportError crudo.
+try:
+    import lgpio
+    _LGPIO_DISPONIBLE = True
+except ImportError:
+    lgpio = None  # type: ignore[assignment]
+    _LGPIO_DISPONIBLE = False
 
 import rclpy
 from rclpy.node import Node
@@ -78,6 +87,15 @@ class NodoActuadores(Node):
     def __init__(self) -> None:
         super().__init__("nodo_actuadores")
 
+        # ── Verificación de hardware GPIO ──────────────────────────────────
+        if not _LGPIO_DISPONIBLE:
+            self.get_logger().fatal(
+                "lgpio no está instalado o no es importable. "
+                "Ejecuta: sudo apt install python3-lgpio\n"
+                "El nodo_actuadores no puede arrancar sin acceso GPIO."
+            )
+            raise RuntimeError("lgpio no disponible — abortando nodo_actuadores")
+
         # ── Parámetros ─────────────────────────────────────────────────────
         self.declare_parameter("gpio_chip",    4)
         self.declare_parameter("pin_step",    17)
@@ -92,6 +110,17 @@ class NodoActuadores(Node):
         # (ver _ejecutar_pasos) para respetar cambios hechos con ros2 param set.
 
         # ── Estado del hilo de movimiento ──────────────────────────────────
+        # DISEÑO DE CONCURRENCIA:
+        # self._lock   → protege SOLO la escritura/lectura de self._hilo_motor.
+        #               NO se adquiere mientras se espera join() para evitar deadlock.
+        # self._cancelar → threading.Event; señala al hilo daemon que pare.
+        #
+        # Flujo correcto para cancelar + relanzar:
+        #   1. _cancelar.set()
+        #   2. Leer referencia al hilo (con lock, muy rápido)
+        #   3. Soltar lock
+        #   4. join() SIN lock (puede tardar hasta delay_pulso × 2 por ciclo)
+        #   5. Adquirir lock para escribir nuevo hilo
         self._hilo_motor: threading.Thread | None = None
         self._cancelar   = threading.Event()
         self._lock       = threading.Lock()
@@ -118,7 +147,7 @@ class NodoActuadores(Node):
             qos,
         )
 
-        # ── Inicialización GPIO (sin fallback — falla con excepción real) ──
+        # ── Inicialización GPIO ────────────────────────────────────────────
         self._h: int = self._init_gpio()
 
         pasos_por_rev = self.get_parameter("pasos_por_rev").get_parameter_value().integer_value
@@ -208,13 +237,33 @@ class NodoActuadores(Node):
             - Nunca hay dos hilos de motor corriendo al mismo tiempo.
             - El hilo anterior siempre termina antes de empezar el nuevo.
             - Si pasos==0, solo cancela sin iniciar nada.
+
+        CORRECCIÓN DE DEADLOCK (Bug #1):
+            El lock NO se mantiene durante join() porque join() puede tardar
+            hasta un semi-ciclo de pulso. Capturamos la referencia al hilo
+            bajo el lock (operación O(1)), soltamos el lock, y luego hacemos
+            join() sin el lock.
         """
-        self._cancelar_movimiento_actual()
+        # Paso 1: señalar cancelación
+        self._cancelar.set()
+
+        # Paso 2: capturar referencia al hilo actual bajo el lock (muy rápido)
+        with self._lock:
+            hilo_anterior = self._hilo_motor
+
+        # Paso 3: join() SIN lock — puede esperar hasta un ciclo de pulso (~1 ms)
+        if hilo_anterior and hilo_anterior.is_alive():
+            hilo_anterior.join(timeout=3.0)
+            if hilo_anterior.is_alive():
+                self.get_logger().warning(
+                    "Advertencia: el hilo de motor no terminó en 3 s."
+                )
 
         if pasos == 0:
             self.get_logger().info("Comando 0 recibido — motor detenido.")
             return
 
+        # Paso 4: limpiar evento y lanzar nuevo hilo bajo el lock
         with self._lock:
             self._cancelar.clear()
             self._hilo_motor = threading.Thread(
@@ -297,15 +346,18 @@ class NodoActuadores(Node):
     def _cancelar_movimiento_actual(self) -> None:
         """
         Señala cancelación y espera hasta 3 s a que el hilo de motor termine.
+        Llamado desde destroy_node(), no desde _lanzar_movimiento().
         """
         self._cancelar.set()
         with self._lock:
-            if self._hilo_motor and self._hilo_motor.is_alive():
-                self._hilo_motor.join(timeout=3.0)
-                if self._hilo_motor.is_alive():
-                    self.get_logger().warning(
-                        "Advertencia: el hilo de motor no terminó en 3 s."
-                    )
+            hilo = self._hilo_motor
+        # join() fuera del lock para no bloquear otros threads que lean _lock
+        if hilo and hilo.is_alive():
+            hilo.join(timeout=3.0)
+            if hilo.is_alive():
+                self.get_logger().warning(
+                    "Advertencia: el hilo de motor no terminó en 3 s."
+                )
 
     # ══════════════════════════════════════════════════════════════════════
     # Ciclo de vida
@@ -328,7 +380,21 @@ class NodoActuadores(Node):
 # ── Punto de entrada ──────────────────────────────────────────────────────
 def main(args=None) -> None:
     rclpy.init(args=args)
-    nodo = NodoActuadores()
+    try:
+        nodo = NodoActuadores()
+    except RuntimeError as exc:
+        # RuntimeError lanzado si lgpio no está disponible — ya logueado en __init__
+        rclpy.shutdown()
+        return
+    except Exception as exc:
+        # Cualquier otro fallo de inicialización (permisos GPIO, chip no encontrado)
+        import logging
+        logging.getLogger(__name__).fatal(
+            f"Error fatal inicializando NodoActuadores: {exc}"
+        )
+        rclpy.shutdown()
+        return
+
     try:
         rclpy.spin(nodo)
     except KeyboardInterrupt:
