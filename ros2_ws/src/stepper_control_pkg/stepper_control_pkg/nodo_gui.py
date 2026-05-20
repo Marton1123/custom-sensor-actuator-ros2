@@ -152,6 +152,9 @@ class VentanaPrincipal(QMainWindow):
         self._build_ui()
         self._ultimo_peso = 0.0
         self._ultimo_estado = "vacio"
+        self._conteo_histeresis = 0
+        self._conteo_bloqueo = 0
+        self._estado_visual_actual = 'ESPERA'
 
         self.senal_frame_raw.connect(self._actualizar_raw)
         self.senal_frame_seg.connect(self._actualizar_seg)
@@ -256,23 +259,52 @@ class VentanaPrincipal(QMainWindow):
         self._evaluar_banner()
 
     def _evaluar_banner(self) -> None:
+        # Si estamos en un estado final, reducimos el contador de bloqueo y no hacemos nada hasta que termine
+        if self._conteo_bloqueo > 0:
+            self._conteo_bloqueo -= 1
+            return
+
         peso = self._ultimo_peso
         estado = self._ultimo_estado.lower()
 
+        # Determinamos el estado físico instantáneo
         if peso < 10.0:
-            self.lbl_banner.setText("Esperando botella... Ingrese su envase.")
-            self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
+            estado_inst = 'ESPERA'
         else:
             if estado in ["grande", "chica"]:
                 if (estado == "chica" and peso < 40.0) or (estado == "grande" and peso < 80.0):
+                    estado_inst = 'LIMPIA'
+                else:
+                    estado_inst = 'SUCIA'
+            else:
+                estado_inst = 'ANALIZANDO'
+
+        # Lógica de histéresis (Debouncing)
+        if estado_inst == self._estado_visual_actual:
+            self._conteo_histeresis = 0
+        else:
+            self._conteo_histeresis += 1
+
+            # Umbral de confirmación para cambiar de estado visual (15 cuadros)
+            if self._conteo_histeresis >= 15:
+                self._estado_visual_actual = estado_inst
+                self._conteo_histeresis = 0
+
+                # Aplicar el nuevo estado a la UI
+                if estado_inst == 'ESPERA':
+                    self.lbl_banner.setText("Esperando botella... Ingrese su envase.")
+                    self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
+                elif estado_inst == 'ANALIZANDO':
+                    self.lbl_banner.setText("Analizando botella... Por favor espere.")
+                    self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
+                elif estado_inst == 'LIMPIA':
                     self.lbl_banner.setText("¡La botella está perfecta! Proceso realizado.")
                     self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #008000; padding: 10px;")
-                else:
+                    self._conteo_bloqueo = 90  # Congelar ~3 segundos
+                elif estado_inst == 'SUCIA':
                     self.lbl_banner.setText("La botella presenta suciedad. Favor retirarla de la máquina.")
                     self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #800000; padding: 10px;")
-            else:
-                self.lbl_banner.setText("Analizando botella... Por favor espere.")
-                self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
+                    self._conteo_bloqueo = 90  # Congelar ~3 segundos
 
     def keyPressEvent(self, event) -> None:
         super().keyPressEvent(event)

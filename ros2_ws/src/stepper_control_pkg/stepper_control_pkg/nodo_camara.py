@@ -322,7 +322,7 @@ class NodoCamara(Node):
             annotated_frame = frame.copy()
             segmentated_frame = frame.copy()
 
-            if mejor_box is not None:
+            if mejor_box is not None and mejor_conf >= 0.65:
                 x1, y1 = int(mejor_box["x1"]), int(mejor_box["y1"])
                 x2, y2 = int(mejor_box["x2"]), int(mejor_box["y2"])
                 ancho = x2 - x1
