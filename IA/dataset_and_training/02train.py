@@ -21,7 +21,19 @@ Uso:
     conda activate botellas
     python scripts/02_train.py
 """
+"""import os(<- usar para el server lo que este comentado, y para local lo que este sin comentar)
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1" 
 
+# ─── Hiperparámetros ───────────────────────────────────────
+RUN_NAME   = "botellas"
+EPOCHS     = 50
+IMG_SIZE   = 640
+BATCH      = 64       # 24 GB VRAM por A5000, con 2 GPUs va sobrado
+WORKERS    = 16
+DEVICE     = [0, 1]
+PATIENCE   = 15
+
+"""
 import shutil
 from pathlib import Path
 
@@ -94,8 +106,8 @@ def export_ncnn(weights: Path) -> Path:
     export_path = model.export(
         format = "ncnn",
         imgsz  = IMG_SIZE,
-        int8   = True,
-        data   = str(DATA_YAML),   # imágenes de calibración para INT8
+        int8   = False,
+        #data   = str(DATA_YAML),   # imágenes de calibración para INT8
     )
 
     # Copiar a models/ con nombre limpio
