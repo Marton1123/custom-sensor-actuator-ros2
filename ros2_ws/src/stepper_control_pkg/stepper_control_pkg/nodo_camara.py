@@ -120,6 +120,8 @@ class NodoCamara(Node):
         self._pub     = self.create_publisher(Image, "/camara/video_raw", QOS_VIDEO)
         self._pub_analisis = self.create_publisher(String, "/analisis_botella", 10)
         self._pub_tamano = self.create_publisher(Float32, "/tamano_estimado", 10)
+        self._pub_video_segmentado = self.create_publisher(Image, "/camara/video_segmentado", QOS_VIDEO)
+        self._ultimo_segmentado = None
 
         # Parametros de IA (NCNN)
         default_model_path = os.path.expanduser("~/custom-sensor-actuator-ros2/IA/models/botellas_ncnn_model")
@@ -227,6 +229,49 @@ class NodoCamara(Node):
             return parse_yolov8_output(raw, self.conf_threshold, self.iou_threshold, scale, pad_w, pad_h)
         return []
 
+    def _aplicar_segmentacion(self, frame_bgr: np.ndarray, bbox: dict) -> np.ndarray:
+        """
+        Aplica K-Means Clustering en el ROI para segmentar anomalias (suciedad).
+        K=3 clusters esperados: Fondo, Transparencia/Plástico, Suciedad/Opaco.
+        """
+        x1 = max(0, int(bbox["x1"]))
+        y1 = max(0, int(bbox["y1"]))
+        x2 = min(frame_bgr.shape[1], int(bbox["x2"]))
+        y2 = min(frame_bgr.shape[0], int(bbox["y2"]))
+        
+        # Validar dimensiones minimas del ROI
+        if x2 - x1 < 10 or y2 - y1 < 10:
+            return frame_bgr.copy()
+
+        roi = frame_bgr[y1:y2, x1:x2]
+        
+        # Mitigación de sombras: Difuminado y conversión a HSV
+        blur = cv2.GaussianBlur(roi, (5, 5), 0)
+        roi_hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
+        
+        # Aplanar imagen para K-Means: (N, 3)
+        pixel_values = roi_hsv.reshape((-1, 3))
+        pixel_values = np.float32(pixel_values)
+
+        # Criterios y K-Means (vectorizado C++)
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+        K = 3
+        _, labels, centers = cv2.kmeans(pixel_values, K, None, criteria, 3, cv2.KMEANS_RANDOM_CENTERS)
+        
+        # Convertir centros a 8 bit y reconstruir
+        centers = np.uint8(centers)
+        segmented_data = centers[labels.flatten()]
+        segmented_roi_hsv = segmented_data.reshape(roi_hsv.shape)
+        
+        # Volver a BGR para visualizacion
+        segmented_roi_bgr = cv2.cvtColor(segmented_roi_hsv, cv2.COLOR_HSV2BGR)
+        
+        # Reconstrucción sobre un canvas (frame original oscurecido para resaltar el ROI segmentado)
+        canvas = cv2.addWeighted(frame_bgr, 0.3, np.zeros_like(frame_bgr), 0, 0)
+        canvas[y1:y2, x1:x2] = segmented_roi_bgr
+        
+        return canvas
+
     def _publicar_frame(self) -> None:
         if not self._captura.isOpened():
             self._fallos_consecutivos += 1
@@ -266,6 +311,7 @@ class NodoCamara(Node):
 
             resultado = "vacio"
             annotated_frame = frame.copy()
+            segmentated_frame = frame.copy()
 
             if mejor_box is not None:
                 x1, y1 = int(mejor_box["x1"]), int(mejor_box["y1"])
@@ -280,6 +326,9 @@ class NodoCamara(Node):
                 msg_tam.data = float(area * self.k_area)
                 self._pub_tamano.publish(msg_tam)
 
+                # Aplicar segmentacion K-Means sobre el ROI
+                segmentated_frame = self._aplicar_segmentacion(frame, mejor_box)
+
                 cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.putText(annotated_frame, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
@@ -289,14 +338,21 @@ class NodoCamara(Node):
             self._pub_analisis.publish(msg_str)
             
             self._ultima_caja = annotated_frame
+            self._ultimo_segmentado = segmentated_frame
         else:
             annotated_frame = self._ultima_caja
+            segmentated_frame = self._ultimo_segmentado if self._ultimo_segmentado is not None else frame.copy()
 
         try:
             msg = self._bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
             msg.header.stamp    = self.get_clock().now().to_msg()
             msg.header.frame_id = "camara_logitech_c270"
             self._pub.publish(msg)
+
+            # Publicar el frame segmentado
+            msg_seg = self._bridge.cv2_to_imgmsg(segmentated_frame, encoding="bgr8")
+            msg_seg.header = msg.header
+            self._pub_video_segmentado.publish(msg_seg)
         except Exception as exc:
             self.get_logger().error(f"Error publicando frame: {exc}")
 
