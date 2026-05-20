@@ -1,57 +1,30 @@
 #!/usr/bin/env python3
 """
-nodo_gui.py  —  Panel de Control Industrial Retro (PyQt6)
-==========================================================
-Modo Kiosco — pantalla vertical 480x800, sin bordes (FramelessWindowHint).
-Estetica SCADA / LabVIEW clasico anos 90.
-
-Arquitectura de hilos:
-    Hilo principal → QApplication.exec()   (Qt event loop)
-    Hilo daemon    → executor.spin()        (ROS 2: publisher + subscriber)
-
-Topicos:
-    Publica  → /comando_grados      (std_msgs/Float32)
-    Suscribe → /camara/video_raw    (sensor_msgs/Image)  desde nodo_camara
-
-Seguridad inter-hilo para la imagen:
-    El callback ROS corre en el hilo daemon.
-    Usamos pyqtSignal(QImage) para entregarla al hilo Qt de forma segura.
-    PyQt6 encolara automaticamente la emision cuando detecte cruce de hilos.
-
-Orden de inicializacion (critico para evitar race condition):
-    1. rclpy.init() + NodoGUI()
-    2. QApplication()
-    3. VentanaPrincipal(nodo)  ← registra callback de frame
-    4. executor.spin() en hilo daemon  ← arranca DESPUES del callback
-    5. app.exec()  ← bloquea hilo principal
-    6. executor.shutdown() + hilo.join()  ← para spin limpiamente
-    7. nodo.destroy_node() + rclpy.shutdown()
+nodo_gui.py  —  Dashboard Informativo Pasivo (PyQt6)
+====================================================
+Modo Producción — pantalla vertical 480x800, sin bordes (FramelessWindowHint).
+Estética dashboard, split screen para video raw y video segmentado.
 """
 
-import subprocess
 import sys
 import threading
-import time
-
 import rclpy
 import rclpy.executors
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy, qos_profile_sensor_data
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from std_msgs.msg import Float32, String
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 
-from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout, QGridLayout,
-    QPushButton, QLabel, QFrame, QGroupBox, QSizePolicy,
-    QMessageBox,
+    QLabel, QSizePolicy,
 )
 
 
-# ── QoS para video (debe coincidir con nodo_camara) ───────────────────────
 QOS_VIDEO = QoSProfile(
     depth=1,
     reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -60,520 +33,210 @@ QOS_VIDEO = QoSProfile(
 )
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# Nodo ROS 2
-# ══════════════════════════════════════════════════════════════════════════
-
 class NodoGUI(Node):
-    """
-    Nodo ROS 2 del frontend:
-      - Publica en /comando_grados (motor).
-      - Se suscribe a /camara/video_raw y envia frames a la GUI via callback.
-    """
-
-    TOPIC_CMD = "/comando_grados"
-    TOPIC_CAM = "/camara/video_raw"
-
     def __init__(self) -> None:
-        """
-        Inicializa el nodo GUI, sus publicadores y suscriptores.
-        Configura los tópicos de motor, cámara y balanza.
-        """
         super().__init__("nodo_gui")
-
-        self._peso_actual = 0.0
-        self._sub_peso = self.create_subscription(
-            Float32, "/peso_botella", self._cb_peso, 10
-        )
-
-        qos_cmd = QoSProfile(depth=10,
-                             reliability=ReliabilityPolicy.RELIABLE,
-                             durability=DurabilityPolicy.VOLATILE)
-        self._pub = self.create_publisher(Float32, self.TOPIC_CMD, qos_cmd)
         self._bridge = CvBridge()
 
-        # Lock protege _fn_emit_frame entre hilo ROS y hilo Qt
-        self._fn_emit_frame = None
-        self._fn_estado = None
+        # Thread safe callbacks
         self._fn_lock = threading.Lock()
+        self._fn_frame_raw = None
+        self._fn_frame_seg = None
+        self._fn_peso = None
+        self._fn_area = None
+        self._fn_estado = None
 
-        self._sub_cam = self.create_subscription(
-            Image, self.TOPIC_CAM, self._cb_camara, QOS_VIDEO
-        )
+        self.create_subscription(Image, "/camara/video_raw", self._cb_camara_raw, QOS_VIDEO)
+        self.create_subscription(Image, "/camara/video_segmentado", self._cb_camara_seg, QOS_VIDEO)
+        self.create_subscription(Float32, "/peso_botella", self._cb_peso, 10)
+        self.create_subscription(Float32, "/tamano_estimado", self._cb_area, 10)
+        self.create_subscription(String, "/analisis_botella", self._cb_estado, 10)
 
-        self._sub_analisis = self.create_subscription(
-            String, "/analisis_botella", self._cb_analisis, 10
-        )
+        self.get_logger().info("NodoGUI (Dashboard) iniciado de forma pasiva.")
 
-        self.get_logger().info(
-            f"NodoGUI listo | publica '{self.TOPIC_CMD}' | "
-            f"suscrito a '{self.TOPIC_CAM}' y '/analisis_botella'"
-        )
+    def registrar_callbacks(self, fn_raw, fn_seg, fn_peso, fn_area, fn_estado):
+        with self._fn_lock:
+            self._fn_frame_raw = fn_raw
+            self._fn_frame_seg = fn_seg
+            self._fn_peso = fn_peso
+            self._fn_area = fn_area
+            self._fn_estado = fn_estado
+
+    def _cb_camara_raw(self, msg: Image) -> None:
+        with self._fn_lock:
+            fn = self._fn_frame_raw
+        if fn:
+            img = self._msg_to_qimage(msg)
+            if img: fn(img)
+
+    def _cb_camara_seg(self, msg: Image) -> None:
+        with self._fn_lock:
+            fn = self._fn_frame_seg
+        if fn:
+            img = self._msg_to_qimage(msg)
+            if img: fn(img)
 
     def _cb_peso(self, msg: Float32) -> None:
-        """
-        Callback para actualizar el peso más reciente.
-        
-        Args:
-            msg (Float32): Mensaje con el peso actual en gramos.
-        """
-        self._peso_actual = msg.data
+        with self._fn_lock:
+            fn = self._fn_peso
+        if fn: fn(msg.data)
 
-    def get_peso(self) -> float:
-        """
-        Obtiene el último peso medido por la balanza.
-        
-        Returns:
-            float: Último peso en gramos.
-        """
-        return self._peso_actual
+    def _cb_area(self, msg: Float32) -> None:
+        with self._fn_lock:
+            fn = self._fn_area
+        if fn: fn(msg.data)
 
-    def _cb_analisis(self, msg: String) -> None:
+    def _cb_estado(self, msg: String) -> None:
         with self._fn_lock:
             fn = self._fn_estado
-        if fn:
-            fn(msg.data)
+        if fn: fn(msg.data)
 
-    def registrar_callback_estado(self, fn: callable) -> None:
-        with self._fn_lock:
-            self._fn_estado = fn
-
-    def registrar_callback_frame(self, fn: callable) -> None:
-        """Registra la funcion que recibe QImage. Llamar ANTES de spin."""
-        with self._fn_lock:
-            self._fn_emit_frame = fn
-
-    def _cb_camara(self, msg: Image) -> None:
-        """Convierte Image ROS a QImage y la emite via senal Qt (thread-safe)."""
-        with self._fn_lock:
-            fn = self._fn_emit_frame
-        if fn is None:
-            return
+    def _msg_to_qimage(self, msg: Image) -> QImage:
         try:
             frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding="rgb8")
             h, w, ch = frame.shape
-            # .tobytes() crea copia propia: sin memory leak por acumulacion de frames
-            img = QImage(frame.tobytes(), w, h, ch * w,
-                         QImage.Format.Format_RGB888)
-            fn(img)
+            return QImage(frame.tobytes(), w, h, ch * w, QImage.Format.Format_RGB888)
         except Exception as exc:
-            self.get_logger().warn(f"Error procesando frame camara: {exc}",
-                                   once=True)
+            self.get_logger().warn(f"Error procesando frame: {exc}", once=True)
+            return None
 
-    def publicar_grados(self, grados: float) -> None:
-        msg = Float32()
-        msg.data = float(grados)
-        self._pub.publish(msg)
-        self.get_logger().info(f"CMD → {grados:+.1f}°")
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# Stylesheet — Windows 95 / SCADA industrial retro
-# ══════════════════════════════════════════════════════════════════════════
-
-WIN95_GRAY   = "#D4D0C8"
-WIN95_WHITE  = "#FFFFFF"
-WIN95_LIGHT  = "#EBEBEB"
-WIN95_SHADOW = "#808080"
-WIN95_DARK   = "#404040"
-LCD_BG       = "#001A00"
-LCD_FG       = "#00FF41"
-
-STYLESHEET = f"""
-QMainWindow, QWidget {{
-    background-color: {WIN95_GRAY};
-    color: #000000;
-    font-family: "Arial", "MS Sans Serif", sans-serif;
-}}
-QPushButton {{
-    background-color: {WIN95_GRAY};
-    color: #000000;
-    font-family: "Arial", sans-serif;
-    font-size: 19px;
-    font-weight: bold;
-    border-top:    3px solid {WIN95_WHITE};
-    border-left:   3px solid {WIN95_WHITE};
-    border-bottom: 3px solid {WIN95_DARK};
-    border-right:  3px solid {WIN95_DARK};
-    padding: 18px 14px;
-}}
-QPushButton:hover {{ background-color: {WIN95_LIGHT}; }}
-QPushButton:pressed {{
-    border-top:    3px solid {WIN95_DARK};
-    border-left:   3px solid {WIN95_DARK};
-    border-bottom: 3px solid {WIN95_WHITE};
-    border-right:  3px solid {WIN95_WHITE};
-    padding-top: 20px; padding-left: 16px;
-    padding-bottom: 16px; padding-right: 12px;
-}}
-QPushButton#btn_stop {{
-    background-color: #AA0000;
-    color: #FFFFFF;
-    font-size: 22px;
-    font-weight: 900;
-    letter-spacing: 3px;
-    border-top:    4px solid #FF7777;
-    border-left:   4px solid #FF7777;
-    border-bottom: 4px solid #330000;
-    border-right:  4px solid #330000;
-    padding: 14px 8px;
-}}
-QPushButton#btn_stop:hover  {{ background-color: #CC0000; }}
-QPushButton#btn_stop:pressed {{
-    background-color: #880000;
-    border-top: 4px solid #330000; border-left: 4px solid #330000;
-    border-bottom: 4px solid #FF7777; border-right: 4px solid #FF7777;
-}}
-QPushButton#btn_apagar {{
-    background-color: #2A1A00;
-    color: #FFA040;
-    font-size: 16px;
-    font-weight: bold;
-    letter-spacing: 1px;
-    border-top:    3px solid #FF8C00;
-    border-left:   3px solid #FF8C00;
-    border-bottom: 3px solid #0D0800;
-    border-right:  3px solid #0D0800;
-    padding: 14px 8px;
-}}
-QPushButton#btn_apagar:hover  {{ background-color: #4A3000; }}
-QPushButton#btn_apagar:pressed {{
-    background-color: #1A0E00;
-    border-top: 3px solid #0D0800; border-left: 3px solid #0D0800;
-    border-bottom: 3px solid #FF8C00; border-right: 3px solid #FF8C00;
-}}
-QLabel#lbl_display {{
-    background-color: {LCD_BG};
-    color: {LCD_FG};
-    font-family: "Courier New", monospace;
-    font-size: 20px;
-    font-weight: bold;
-    border-top:    3px solid {WIN95_SHADOW};
-    border-left:   3px solid {WIN95_SHADOW};
-    border-bottom: 3px solid {WIN95_WHITE};
-    border-right:  3px solid {WIN95_WHITE};
-    padding: 8px 16px;
-    letter-spacing: 2px;
-}}
-QLabel#lbl_camara {{
-    background-color: #000000;
-    color: #004400;
-    font-family: "Courier New", monospace;
-    font-size: 14px;
-    font-weight: bold;
-    border-top:    4px solid {WIN95_DARK};
-    border-left:   4px solid {WIN95_DARK};
-    border-bottom: 4px solid {WIN95_WHITE};
-    border-right:  4px solid {WIN95_WHITE};
-}}
-QGroupBox {{
-    font-weight: bold;
-    font-size: 13px;
-    color: #000000;
-    border-top:    2px solid {WIN95_SHADOW};
-    border-left:   2px solid {WIN95_SHADOW};
-    border-bottom: 2px solid {WIN95_WHITE};
-    border-right:  2px solid {WIN95_WHITE};
-    margin-top: 14px; padding-top: 6px;
-}}
-QGroupBox::title {{
-    subcontrol-origin: margin;
-    subcontrol-position: top left;
-    padding: 2px 8px;
-    background-color: {WIN95_GRAY};
-}}
-QFrame[frameShape="4"], QFrame[frameShape="5"] {{
-    color: {WIN95_SHADOW};
-}}
-"""
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# Ventana principal
-# ══════════════════════════════════════════════════════════════════════════
 
 class VentanaPrincipal(QMainWindow):
-    """
-    Panel de control industrial retro — Modo Kiosco vertical 480x800.
-
-    Layout:
-        [lbl_camara    stretch=3]   <- video en vivo desde nodo_camara
-        [lbl_display   fixed 55px]  <- LCD ultimo comando
-        [control_group stretch=2]   <- botones 2x2
-        [hline]
-        [btn_stop  stretch=2 | btn_apagar stretch=1]
-    """
-
-    # Senal definida a nivel de clase (requerido por PyQt6).
-    # Emitida desde hilo ROS, recibida en hilo Qt (cross-thread encolado automatico).
-    senal_frame_nuevo: pyqtSignal = pyqtSignal(QImage)
-    senal_analisis: pyqtSignal = pyqtSignal(str)
+    senal_frame_raw = pyqtSignal(QImage)
+    senal_frame_seg = pyqtSignal(QImage)
+    senal_peso = pyqtSignal(float)
+    senal_area = pyqtSignal(float)
+    senal_estado = pyqtSignal(str)
 
     def __init__(self, nodo: NodoGUI) -> None:
         super().__init__()
         self._nodo = nodo
-        self.setWindowTitle("Panel de Control — NEMA 17")
+        self.setWindowTitle("Dashboard Informativo")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setWindowState(Qt.WindowState.WindowFullScreen)
+        self.setStyleSheet("background-color: #0f172a; color: #f8fafc; font-family: sans-serif;")
 
         self._build_ui()
 
-        # Conecta la senal al slot en el hilo Qt
-        self.senal_frame_nuevo.connect(self._mostrar_frame)
-        self.senal_analisis.connect(self._procesar_analisis)
+        self.senal_frame_raw.connect(self._actualizar_raw)
+        self.senal_frame_seg.connect(self._actualizar_seg)
+        self.senal_peso.connect(self._actualizar_peso)
+        self.senal_area.connect(self._actualizar_area)
+        self.senal_estado.connect(self._actualizar_estado)
 
-        # Registra la emision de la senal como callback del nodo ROS.
-        # DEBE ocurrir antes de hilo_ros.start() para evitar race condition.
-        nodo.registrar_callback_frame(self.senal_frame_nuevo.emit)
-        nodo.registrar_callback_estado(self.senal_analisis.emit)
-
-        self._flujo_activo = False
-        self._esperando_retiro = False
-        self._tiempo_vacio_inicio = 0.0
-        self._tamano_detectado = ""
+        nodo.registrar_callbacks(
+            self.senal_frame_raw.emit,
+            self.senal_frame_seg.emit,
+            self.senal_peso.emit,
+            self.senal_area.emit,
+            self.senal_estado.emit
+        )
 
         self.showFullScreen()
-
-    # ── Construccion de UI ───────────────────────────────────────────────
 
     def _build_ui(self) -> None:
         root = QWidget()
         self.setCentralWidget(root)
-        main_layout = QVBoxLayout(root)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(5)
-
-        main_layout.addWidget(self._make_camera_label(), stretch=3)
-        main_layout.addWidget(self._make_interactive_panel())
-        main_layout.addWidget(self._make_display())
-        main_layout.addWidget(self._make_control_group(), stretch=2)
-        main_layout.addWidget(self._hline())
-
-        fila_pie = QHBoxLayout()
-        fila_pie.setSpacing(5)
-        fila_pie.addWidget(self._make_stop_button())
-        main_layout.addLayout(fila_pie)
-
-    # ── Widgets ──────────────────────────────────────────────────────────
-
-    def _make_camera_label(self) -> QLabel:
-        lbl = QLabel()
-        lbl.setObjectName("lbl_camara")
-        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl.setText(
-            "[ Esperando botella... ]"
-        )
-        lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        lbl.setMinimumHeight(300)
-        self._lbl_camara = lbl
-        return lbl
-
-    def _make_display(self) -> QLabel:
-        self._lbl_display = QLabel("ULTIMO COMANDO:  ---")
-        self._lbl_display.setObjectName("lbl_display")
-        self._lbl_display.setFixedHeight(55)
-        self._lbl_display.setAlignment(
-            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter
-        )
-        return self._lbl_display
-
-    def _make_interactive_panel(self) -> QWidget:
-        """
-        Construye el panel interactivo superior.
-        Este panel muestra los mensajes de estado del sistema (Esperando botella, Analizando peso...).
+        layout = QVBoxLayout(root)
         
-        Returns:
-            QWidget: El contenedor con el panel de estado interactivo.
-        """
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(5, 5, 5, 5)
+        # Título
+        titulo = QLabel("MONITOREO DE VISIÓN Y SENSORES")
+        titulo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        titulo.setStyleSheet("font-size: 24px; font-weight: bold; color: #38bdf8; margin: 10px;")
+        layout.addWidget(titulo)
+
+        # Videos en Grid
+        grid_videos = QGridLayout()
+        self.lbl_camara_raw = QLabel("[ VIDEO RAW ]")
+        self.lbl_camara_seg = QLabel("[ VIDEO SEGMENTADO ]")
         
-        self._lbl_interactivo = QLabel("Esperando botella...")
-        self._lbl_interactivo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._lbl_interactivo.setStyleSheet("font-size: 24px; font-weight: bold; color: #00FF00; background: #002200; padding: 10px; border: 2px solid #004400;")
-        
-        layout.addWidget(self._lbl_interactivo)
-        return panel
-
-    def _make_control_group(self) -> QGroupBox:
-        group = QGroupBox(" CONTROL DE MOVIMIENTO ")
-        group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        group.setMaximumHeight(250)
-        grid = QGridLayout(group)
-        grid.setSpacing(10)
-        grid.setContentsMargins(10, 14, 10, 10)
-
-        botones = [
-            ("+90°",               90.0,  0, 0),
-            ("-90°",              -90.0,  0, 1),
-            ("+1 VUELTA (+360°)", 360.0,  1, 0),
-            ("-1 VUELTA (-360°)",-360.0,  1, 1),
-        ]
-        for texto, grados, fila, col in botones:
-            btn = QPushButton(texto)
-            btn.setMinimumSize(QSize(160, 90))
-            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda _, g=grados: self._enviar(g))
-            grid.addWidget(btn, fila, col)
-        return group
-
-    def _make_stop_button(self) -> QPushButton:
-        btn = QPushButton("[ PARO DE EMERGENCIA ]")
-        btn.setObjectName("btn_stop")
-        btn.setFixedHeight(90)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setToolTip("Envia 0 grados — detiene el motor inmediatamente")
-        btn.clicked.connect(lambda: self._enviar(0.0))
-        return btn
-
-    # ── Slots y logica ───────────────────────────────────────────────────
-
-    def _mostrar_frame(self, img: QImage) -> None:
-        """
-        Slot Qt — ejecutado en hilo principal al llegar un frame.
-        setPixmap() descarta el pixmap anterior automaticamente: sin memory leak.
-        """
-        pixmap = QPixmap.fromImage(img)
-        self._lbl_camara.setPixmap(
-            pixmap.scaled(
-                self._lbl_camara.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        )
-
-    def _enviar(self, grados: float) -> None:
-        self._nodo.publicar_grados(grados)
-
-        if grados == 0.0:
-            texto = "ULTIMO COMANDO:  *** PARO ***"
-            color = "#FF4444"
-        else:
-            signo = "+" if grados > 0 else ""
-            texto = f"ULTIMO COMANDO:  {signo}{grados:.1f}°"
-            color = "#00FF41" if grados > 0 else "#FFD700"
-
-        self._lbl_display.setText(texto)
-        self._lbl_display.setStyleSheet(
-            f"background-color:{LCD_BG}; color:{color};"
-            "font-family:'Courier New',monospace; font-size:20px; font-weight:bold;"
-            f"border-top:3px solid {WIN95_SHADOW}; border-left:3px solid {WIN95_SHADOW};"
-            f"border-bottom:3px solid {WIN95_WHITE}; border-right:3px solid {WIN95_WHITE};"
-            "padding:8px 16px; letter-spacing:2px;"
-        )
-
-    def _procesar_analisis(self, resultado_str: str) -> None:
-        """
-        Ciclo de vida de la GUI. Procesamiento de los resultados de visión.
-        Controla la lógica de la máquina de estados frente a los cambios.
-
-        Args:
-            resultado_str (str): Cadena enviada por el clasificador YOLO.
-        """
-        if self._esperando_retiro:
-            if resultado_str == "vacio":
-                if self._tiempo_vacio_inicio == 0.0:
-                    self._tiempo_vacio_inicio = time.time()
-                elif time.time() - self._tiempo_vacio_inicio >= 2.0:
-                    # 2 segundos de vacio continuo -> Reset
-                    self._esperando_retiro = False
-                    self._flujo_activo = False
-                    self._tiempo_vacio_inicio = 0.0
-                    self._lbl_interactivo.setStyleSheet("font-size: 24px; font-weight: bold; color: #00FF00; background: #002200; padding: 10px; border: 2px solid #004400;")
-                    self._lbl_interactivo.setText("Esperando botella...")
-            else:
-                self._tiempo_vacio_inicio = 0.0
-            return
-
-        if not self._flujo_activo and resultado_str in ["grande", "chica"]:
-            self._flujo_activo = True
-            self._tamano_detectado = resultado_str
-            self._lbl_interactivo.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFAA00; background: #222200; padding: 10px; border: 2px solid #554400;")
-            self._lbl_interactivo.setText(f"Analizando peso... ({'Grande' if resultado_str == 'grande' else 'Chica'})")
+        for lbl in (self.lbl_camara_raw, self.lbl_camara_seg):
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("background-color: #000000; border: 2px solid #334155;")
+            lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             
-            # Simulamos el retardo de análisis de peso con un Timer
-            QTimer.singleShot(1000, self._evaluar_peso)
+        grid_videos.addWidget(self.lbl_camara_raw, 0, 0)
+        grid_videos.addWidget(self.lbl_camara_seg, 0, 1)
+        layout.addLayout(grid_videos, stretch=3)
 
-    def _evaluar_peso(self) -> None:
-        """
-        Evalúa el peso actual contra el tamaño detectado.
-        Si la botella está dentro del rango esperado, se mueve el motor.
-        Si la botella tiene líquido (peso excedido), se rechaza.
-        """
-        peso = self._nodo.get_peso()
-        es_limpia = False
+        # Panel de Metadatos Inferior
+        panel_inferior = QHBoxLayout()
+        
+        self.lbl_peso = self._make_data_label("PESO (g)", "0.0")
+        self.lbl_area = self._make_data_label("ÁREA (cm²)", "0.0")
+        self.lbl_estado = self._make_data_label("ESTADO", "Vacio")
+        
+        panel_inferior.addWidget(self.lbl_peso)
+        panel_inferior.addWidget(self.lbl_area)
+        panel_inferior.addWidget(self.lbl_estado)
+        
+        layout.addLayout(panel_inferior, stretch=1)
 
-        if self._tamano_detectado == "chica" and peso < 40.0:
-            es_limpia = True
-        elif self._tamano_detectado == "grande" and peso < 80.0:
-            es_limpia = True
+    def _make_data_label(self, titulo: str, valor: str) -> QWidget:
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        
+        lbl_tit = QLabel(titulo)
+        lbl_tit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_tit.setStyleSheet("font-size: 16px; color: #94a3b8;")
+        
+        lbl_val = QLabel(valor)
+        lbl_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_val.setStyleSheet("font-size: 32px; font-weight: bold; color: #4ade80;")
+        
+        layout.addWidget(lbl_tit)
+        layout.addWidget(lbl_val)
+        
+        # Guardamos la referencia dinámica en el contenedor para poder modificarla después
+        container.valor_label = lbl_val
+        container.setStyleSheet("background-color: #1e293b; border-radius: 10px; margin: 5px;")
+        return container
 
-        if es_limpia:
-            self._lbl_interactivo.setStyleSheet("font-size: 24px; font-weight: bold; color: #00FF00; background: #004400; padding: 10px; border: 2px solid #00AA00;")
-            self._lbl_interactivo.setText(f"¡Reciclaje Exitoso! Peso: {peso:.1f}g")
-            QApplication.beep()
-            self._enviar(90.0)
-            self._esperando_retiro = True
-            self._tiempo_vacio_inicio = 0.0
+    def _actualizar_raw(self, img: QImage) -> None:
+        self.lbl_camara_raw.setPixmap(QPixmap.fromImage(img).scaled(
+            self.lbl_camara_raw.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+        ))
+
+    def _actualizar_seg(self, img: QImage) -> None:
+        self.lbl_camara_seg.setPixmap(QPixmap.fromImage(img).scaled(
+            self.lbl_camara_seg.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+        ))
+
+    def _actualizar_peso(self, peso: float) -> None:
+        self.lbl_peso.valor_label.setText(f"{peso:.1f}")
+
+    def _actualizar_area(self, area: float) -> None:
+        self.lbl_area.valor_label.setText(f"{area:.1f}")
+
+    def _actualizar_estado(self, estado: str) -> None:
+        self.lbl_estado.valor_label.setText(estado.upper())
+        if estado.lower() == "vacio":
+            self.lbl_estado.valor_label.setStyleSheet("font-size: 32px; font-weight: bold; color: #94a3b8;")
+        elif estado.lower() in ["grande", "chica"]:
+            self.lbl_estado.valor_label.setStyleSheet("font-size: 32px; font-weight: bold; color: #facc15;")
         else:
-            self._lbl_interactivo.setStyleSheet("font-size: 24px; font-weight: bold; color: #FF0000; background: #440000; padding: 10px; border: 2px solid #AA0000;")
-            self._lbl_interactivo.setText(f"Botella con líquido ({peso:.1f}g). Vacíela.")
-            QApplication.beep()
-            self._esperando_retiro = True
-            self._tiempo_vacio_inicio = 0.0
-
-    @staticmethod
-    def _hline() -> QFrame:
-        f = QFrame()
-        f.setFrameShape(QFrame.Shape.HLine)
-        f.setFrameShadow(QFrame.Shadow.Sunken)
-        return f
+            self.lbl_estado.valor_label.setStyleSheet("font-size: 32px; font-weight: bold; color: #ef4444;")
 
     def keyPressEvent(self, event) -> None:
-        """Modo kiosco: ninguna tecla cierra la aplicacion."""
         super().keyPressEvent(event)
 
-
-# ══════════════════════════════════════════════════════════════════════════
-# Punto de entrada
-# ══════════════════════════════════════════════════════════════════════════
-
 def main(args=None) -> None:
-    # 1. ROS 2
     rclpy.init(args=args)
     nodo = NodoGUI()
-
-    # 2. Qt
     app = QApplication(sys.argv)
-    app.setStyleSheet(STYLESHEET)
-
-    # 3. Ventana — registra callback ANTES de arrancar el hilo de spin
     ventana = VentanaPrincipal(nodo)
 
-    # 4. Spin en hilo daemon con executor controlable para shutdown limpio
     executor = rclpy.executors.SingleThreadedExecutor()
     executor.add_node(nodo)
-    hilo_ros = threading.Thread(
-        target=executor.spin,
-        daemon=True,
-        name="hilo_rclpy",
-    )
+    hilo_ros = threading.Thread(target=executor.spin, daemon=True)
     hilo_ros.start()
 
-    # 5. Qt event loop — bloquea hasta que la app cierre
     exit_code = app.exec()
-
-    # 6. Shutdown ordenado: señalar al executor, esperar al hilo
     executor.shutdown(timeout_sec=2.0)
     hilo_ros.join(timeout=3.0)
-
-    # 7. Limpiar nodo y contexto ROS
     nodo.destroy_node()
     rclpy.shutdown()
     sys.exit(exit_code)
-
 
 if __name__ == "__main__":
     main()
