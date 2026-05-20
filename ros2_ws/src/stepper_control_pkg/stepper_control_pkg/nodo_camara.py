@@ -232,43 +232,52 @@ class NodoCamara(Node):
     def _aplicar_segmentacion(self, frame_bgr: np.ndarray, bbox: dict) -> np.ndarray:
         """
         Aplica K-Means Clustering en el ROI para segmentar anomalias (suciedad).
-        K=3 clusters esperados: Fondo, Transparencia/Plástico, Suciedad/Opaco.
+        Optimizacion: Submuestreo agresivo a 64x64 previo a K-Means.
         """
         x1 = max(0, int(bbox["x1"]))
         y1 = max(0, int(bbox["y1"]))
         x2 = min(frame_bgr.shape[1], int(bbox["x2"]))
         y2 = min(frame_bgr.shape[0], int(bbox["y2"]))
         
+        ancho_roi = x2 - x1
+        alto_roi = y2 - y1
+
         # Validar dimensiones minimas del ROI
-        if x2 - x1 < 10 or y2 - y1 < 10:
+        if ancho_roi < 10 or alto_roi < 10:
             return frame_bgr.copy()
 
         roi = frame_bgr[y1:y2, x1:x2]
         
-        # Mitigación de sombras: Difuminado y conversión a HSV
-        blur = cv2.GaussianBlur(roi, (5, 5), 0)
+        # DOWN-SAMPLING (64x64) para evitar cuello de botella de CPU
+        roi_pequeno = cv2.resize(roi, (64, 64), interpolation=cv2.INTER_LINEAR)
+        
+        # Mitigación de sombras: Difuminado y conversión a HSV sobre la miniatura
+        blur = cv2.GaussianBlur(roi_pequeno, (5, 5), 0)
         roi_hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
         
         # Aplanar imagen para K-Means: (N, 3)
         pixel_values = roi_hsv.reshape((-1, 3))
         pixel_values = np.float32(pixel_values)
 
-        # Criterios y K-Means (vectorizado C++)
+        # Criterios y K-Means relajados (máx 10 iteraciones, epsilon 1.0)
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
         K = 3
         _, labels, centers = cv2.kmeans(pixel_values, K, None, criteria, 3, cv2.KMEANS_RANDOM_CENTERS)
         
-        # Convertir centros a 8 bit y reconstruir
+        # Convertir centros a 8 bit y reconstruir miniatura
         centers = np.uint8(centers)
         segmented_data = centers[labels.flatten()]
-        segmented_roi_hsv = segmented_data.reshape(roi_hsv.shape)
+        segmented_roi_hsv = segmented_data.reshape((64, 64, 3))
         
         # Volver a BGR para visualizacion
         segmented_roi_bgr = cv2.cvtColor(segmented_roi_hsv, cv2.COLOR_HSV2BGR)
         
+        # UP-SAMPLING (restaurar al tamaño original del ROI sin difuminar bordes)
+        segmented_roi_bgr_large = cv2.resize(segmented_roi_bgr, (ancho_roi, alto_roi), interpolation=cv2.INTER_NEAREST)
+
         # Reconstrucción sobre un canvas (frame original oscurecido para resaltar el ROI segmentado)
         canvas = cv2.addWeighted(frame_bgr, 0.3, np.zeros_like(frame_bgr), 0, 0)
-        canvas[y1:y2, x1:x2] = segmented_roi_bgr
+        canvas[y1:y2, x1:x2] = segmented_roi_bgr_large
         
         return canvas
 
