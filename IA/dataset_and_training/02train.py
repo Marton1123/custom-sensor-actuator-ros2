@@ -38,9 +38,9 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 RUN_NAME   = "botellas"
 EPOCHS     = 50
 IMG_SIZE   = 640
-BATCH      = 64      # seguro para GTX 1650 (4 GB VRAM) con 640px
-WORKERS    = 8
-DEVICE     = [0, 1]       # GPU 0. Cambiar a "cpu" solo para pruebas rápidas.
+BATCH      = 16      # seguro para GTX 1650 (4 GB VRAM) con 640px
+WORKERS    = 4
+DEVICE     = 0       # GPU 0. Cambiar a "cpu" solo para pruebas rápidas.
 PATIENCE   = 15      # early stopping: detiene si no mejora en 15 epochs
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -75,8 +75,10 @@ def train() -> Path:
         mixup     = 0.1,
     )
 
-    best = Path(results.save_dir) / "weights" / "best.pt"
-    assert best.exists(), f"No se generó best.pt en {best}"
+    # Con multi-GPU (DDP), results es None en el proceso principal.
+    # Construimos la ruta desde project/name que nosotros controlamos.
+    best = RUNS_DIR / RUN_NAME / "weights" / "best.pt"
+    assert best.exists(), f"No se generó best.pt en {best}. Revisa logs en {RUNS_DIR / RUN_NAME}/"
     print(f"\n[INFO] Entrenamiento completo.")
     print(f"[INFO] Mejor modelo: {best}")
     return best
