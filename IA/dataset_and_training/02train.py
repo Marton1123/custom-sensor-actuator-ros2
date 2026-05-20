@@ -34,6 +34,9 @@ DEVICE     = [0, 1]
 PATIENCE   = 15
 
 """
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+
 import shutil
 from pathlib import Path
 
@@ -48,12 +51,12 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 # ─── Hiperparámetros ──────────────────────────────────────────────────────────
 RUN_NAME   = "botellas"
-EPOCHS     = 50
+EPOCHS     = 100
 IMG_SIZE   = 640
-BATCH      = 16      # seguro para GTX 1650 (4 GB VRAM) con 640px
-WORKERS    = 4
-DEVICE     = 0       # GPU 0. Cambiar a "cpu" solo para pruebas rápidas.
-PATIENCE   = 15      # early stopping: detiene si no mejora en 15 epochs
+BATCH      = 65      # seguro para GTX 1650 (4 GB VRAM) con 640px
+WORKERS    = 16
+DEVICE     = [0, 1]      # GPU 0. Cambiar a "cpu" solo para pruebas rápidas.
+PATIENCE   = 20      # early stopping: detiene si no mejora en 15 epochs
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -106,8 +109,7 @@ def export_ncnn(weights: Path) -> Path:
     export_path = model.export(
         format = "ncnn",
         imgsz  = IMG_SIZE,
-        int8   = False,
-        #data   = str(DATA_YAML),   # imágenes de calibración para INT8
+        
     )
 
     # Copiar a models/ con nombre limpio
