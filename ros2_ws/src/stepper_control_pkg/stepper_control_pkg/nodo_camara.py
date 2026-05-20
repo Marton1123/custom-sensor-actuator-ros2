@@ -237,18 +237,19 @@ class NodoCamara(Node):
         return []
 
     def _aplicar_segmentacion(self, frame_bgr: np.ndarray, bbox: dict) -> tuple:
+        frame_copia = frame_bgr.copy()
         x1, y1 = int(bbox["x1"]), int(bbox["y1"])
         x2, y2 = int(bbox["x2"]), int(bbox["y2"])
 
         x1 = max(0, x1)
         y1 = max(0, y1)
-        x2 = min(frame_bgr.shape[1], x2)
-        y2 = min(frame_bgr.shape[0], y2)
+        x2 = min(frame_copia.shape[1], x2)
+        y2 = min(frame_copia.shape[0], y2)
 
         if (x2 <= x1) or (y2 <= y1):
-            return frame_bgr.copy(), "LIMPIA"
+            return frame_copia, "LIMPIA"
 
-        roi = frame_bgr[y1:y2, x1:x2]
+        roi = frame_copia[y1:y2, x1:x2]
 
         roi_hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
@@ -274,7 +275,7 @@ class NodoCamara(Node):
         anomalia_bgr[mask_anomalia > 0] = [0, 0, 255]
 
         # Canvas con fondo oscurecido
-        canvas = cv2.addWeighted(frame_bgr, 0.3, np.zeros_like(frame_bgr), 0, 0)
+        canvas = cv2.addWeighted(frame_copia, 0.3, np.zeros_like(frame_copia), 0, 0)
         canvas[y1:y2, x1:x2] = anomalia_bgr
 
         return canvas, estado_limpieza
@@ -340,13 +341,13 @@ class NodoCamara(Node):
             resultado = "grande" if area > 33000 else "chica"
 
             if self._frames_botella < 15:
-                annotated_frame = frame.copy()
-                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(annotated_frame, f"CONF: {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
+                frame_raw_limpio = frame.copy()
+                cv2.rectangle(frame_raw_limpio, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(frame_raw_limpio, f"CONF: {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                 
                 try:
-                    msg_raw = self._bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
+                    msg_raw = self._bridge.cv2_to_imgmsg(frame_raw_limpio, encoding="bgr8")
                     msg_raw.header.stamp = msg_raw_header
                     msg_raw.header.frame_id = "camara_logitech_c270"
                     self._pub.publish(msg_raw)
@@ -358,13 +359,13 @@ class NodoCamara(Node):
                 return
 
             if self._frames_botella >= 15:
-                annotated_frame = frame.copy()
-                segmentated_frame, estado_limpieza = self._aplicar_segmentacion(frame, mejor_box)
+                frame_raw_limpio = frame.copy()
+                segmentated_frame, estado_limpieza = self._aplicar_segmentacion(frame_raw_limpio, mejor_box)
                 
                 self._ultimo_veredicto = f"Botella {resultado.upper()} {estado_limpieza}"
 
-                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(annotated_frame, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
+                cv2.rectangle(frame_raw_limpio, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(frame_raw_limpio, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
                 cv2.rectangle(segmentated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -372,7 +373,7 @@ class NodoCamara(Node):
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
                 try:
-                    msg_anotada = self._bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
+                    msg_anotada = self._bridge.cv2_to_imgmsg(frame_raw_limpio, encoding="bgr8")
                     msg_anotada.header.stamp = msg_raw_header
                     msg_anotada.header.frame_id = "camara_logitech_c270"
                     self._pub.publish(msg_anotada)
