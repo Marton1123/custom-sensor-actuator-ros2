@@ -10,6 +10,7 @@ Resiliencia:
     fallidos. La GUI mostrara el placeholder de texto durante la reconexion.
 """
 
+import os
 import cv2
 import rclpy
 import threading
@@ -41,7 +42,8 @@ class NodoCamara(Node):
         self._pub_analisis = self.create_publisher(String, "/analisis_botella", 10)
 
         # Parametros de IA (YOLO)
-        self.declare_parameter("modelo_ncnn", "/home/pi/modelos/best_ncnn_model")
+        default_model_path = os.path.expanduser("~/custom-sensor-actuator-ros2/IA/models/botellas_ncnn_model")
+        self.declare_parameter("modelo_ncnn", default_model_path)
         self.declare_parameter("k_area", 0.05)
         self.declare_parameter("conf_threshold", 0.70)
         
@@ -49,12 +51,16 @@ class NodoCamara(Node):
         self.k_area = float(self.get_parameter("k_area").value)
         self.conf_threshold = float(self.get_parameter("conf_threshold").value)
 
-        self.get_logger().info(f"Cargando modelo NCNN: {self.modelo_path}")
-        try:
-            self.model = YOLO(self.modelo_path, task="detect")
-        except Exception as e:
-            self.get_logger().error(f"Error cargando YOLO: {e}")
+        if not os.path.exists(self.modelo_path):
+            self.get_logger().error(f"La carpeta del modelo NCNN no existe en la ruta: {self.modelo_path}")
             self.model = None
+        else:
+            self.get_logger().info(f"Cargando modelo NCNN: {self.modelo_path}")
+            try:
+                self.model = YOLO(self.modelo_path, task="detect")
+            except Exception as e:
+                self.get_logger().error(f"Error cargando YOLO: {e}")
+                self.model = None
 
         self._fallos_consecutivos = 0
         self._frame_count = 0
