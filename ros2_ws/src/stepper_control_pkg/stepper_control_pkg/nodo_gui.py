@@ -82,7 +82,6 @@ class NodoGUI(Node):
         self._fn_area = None
         self._fn_estado = None
 
-        self._pub_comando_foto = self.create_publisher(Bool, "/comando_fotografia", 10)
         self.create_subscription(Image, "/camara/video_raw", self._cb_camara_raw, QOS_VIDEO)
         self.create_subscription(Image, "/camara/video_segmentado", self._cb_camara_seg, QOS_VIDEO)
         self.create_subscription(Float32, "/peso_botella", self._cb_peso, 10)
@@ -90,11 +89,6 @@ class NodoGUI(Node):
         self.create_subscription(String, "/analisis_botella", self._cb_estado, 10)
 
         self.get_logger().info("NodoGUI (Dashboard) iniciado de forma pasiva.")
-
-    def disparar_fotografia(self):
-        msg = Bool()
-        msg.data = True
-        self._pub_comando_foto.publish(msg)
 
     def registrar_callbacks(self, fn_raw, fn_seg, fn_peso, fn_area, fn_estado):
         with self._fn_lock:
@@ -155,15 +149,11 @@ class VentanaPrincipal(QMainWindow):
         self._nodo = nodo
         self.setWindowTitle("Dashboard Informativo")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
-        self.setWindowState(Qt.WindowState.WindowFullScreen)
+        self.setFixedSize(800, 480)
 
         self._build_ui()
         self._ultimo_peso = 0.0
         self._ultimo_estado = "vacio"
-        import time
-        self.time = time
-        self._estado_maquina = 1
-        self._tiempo_estabilizando = 0.0
 
         self.senal_frame_raw.connect(self._actualizar_raw)
         self.senal_frame_seg.connect(self._actualizar_seg)
@@ -202,7 +192,8 @@ class VentanaPrincipal(QMainWindow):
         
         for lbl in (self.lbl_camara_raw, self.lbl_camara_seg):
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setFixedSize(ANCHO_VISOR, ALTO_VISOR)
+            lbl.setFixedSize(320, 240)
+            lbl.setScaledContents(False)
             
         grid_videos.addWidget(self.lbl_camara_raw, 0, 0)
         grid_videos.addWidget(self.lbl_camara_seg, 0, 1)
@@ -242,74 +233,37 @@ class VentanaPrincipal(QMainWindow):
         return container
 
     def _actualizar_raw(self, img: QImage) -> None:
-        if self._estado_maquina in [1, 2, 3, 4]:
-            self.lbl_camara_raw.setPixmap(QPixmap.fromImage(img).scaled(
-                ANCHO_VISOR, ALTO_VISOR, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-            ))
+        self.lbl_camara_raw.setPixmap(QPixmap.fromImage(img).scaled(
+            320, 240, Qt.AspectRatioMode.KeepAspectRatio
+        ))
 
     def _actualizar_seg(self, img: QImage) -> None:
         self.lbl_camara_seg.setPixmap(QPixmap.fromImage(img).scaled(
-            ANCHO_VISOR, ALTO_VISOR, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+            320, 240, Qt.AspectRatioMode.KeepAspectRatio
         ))
 
     def _actualizar_peso(self, peso: float) -> None:
         self._ultimo_peso = peso
         self.lbl_peso.valor_label.setText(f"{peso:.1f}")
-        self._maquina_estados()
 
     def _actualizar_area(self, area: float) -> None:
         self.lbl_area.valor_label.setText(f"{area:.1f}")
 
     def _actualizar_estado(self, estado: str) -> None:
-        self._ultimo_estado = estado
+        self._ultimo_estado = estado.lower()
         self.lbl_estado.valor_label.setText(estado.upper())
-        if self._estado_maquina == 3:
-            self._procesar_resultado(peso=self._ultimo_peso, estado=self._ultimo_estado.lower())
-
-    def _maquina_estados(self) -> None:
-        peso = self._ultimo_peso
-
-        if self._estado_maquina == 1:
-            if peso >= 10.0:
-                self._estado_maquina = 2
-                self._tiempo_estabilizando = self.time.time()
-                self.lbl_banner.setText("ESTABILIZANDO... POR FAVOR RETIRE LA MANO.")
-                self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
-
-        elif self._estado_maquina == 2:
-            if peso < 10.0:
-                self._estado_maquina = 1
-                self.lbl_banner.setText("ESPERANDO BOTELLA... INGRESE SU ENVASE.")
-                self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
-            elif self.time.time() - self._tiempo_estabilizando >= 2.0:
-                self._estado_maquina = 3
-                self.lbl_banner.setText("FOTOGRAFÍA Y ANÁLISIS EN CURSO...")
-                self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
-                self._nodo.disparar_fotografia()
-
-        elif self._estado_maquina == 5:
-            if peso < 10.0:
-                self._estado_maquina = 1
-                self.lbl_banner.setText("ESPERANDO BOTELLA... INGRESE SU ENVASE.")
-                self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
-                self.lbl_camara_seg.clear()
-                self.lbl_camara_seg.setText("[ VIDEO SEGMENTADO ]")
-                self.lbl_estado.valor_label.setText("VACIO")
-                self.lbl_area.valor_label.setText("0.0")
-
-    def _procesar_resultado(self, peso: float, estado: str) -> None:
-        if estado in ["grande", "chica"]:
-            if (estado == "chica" and peso < 40.0) or (estado == "grande" and peso < 80.0):
-                self.lbl_banner.setText("¡BOTELLA PERFECTA! PROCESO REALIZADO. RETIRE BOTELLA.")
-                self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #008000; padding: 10px;")
-            else:
-                self.lbl_banner.setText("BOTELLA SUCIA/CON LÍQUIDO. FAVOR RETIRARLA DE LA MÁQUINA.")
-                self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #800000; padding: 10px;")
-        else:
-            self.lbl_banner.setText("NO SE DETECTÓ BOTELLA VÁLIDA. FAVOR RETIRAR EL OBJETO.")
-            self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #800000; padding: 10px;")
-            
-        self._estado_maquina = 5
+        
+        if self._ultimo_estado == "vacio":
+            self.lbl_banner.setText("ESPERANDO BOTELLA... INGRESE SU ENVASE.")
+            self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
+            self.lbl_camara_seg.clear()
+            self.lbl_camara_seg.setText("[ VIDEO SEGMENTADO ]")
+        elif self._ultimo_estado == "analizando":
+            self.lbl_banner.setText("ESTABILIZANDO... POR FAVOR RETIRE LA MANO.")
+            self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
+        elif self._ultimo_estado in ["grande", "chica"]:
+            self.lbl_banner.setText("¡ANÁLISIS COMPLETADO! RETIRE BOTELLA.")
+            self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #008000; padding: 10px;")
 
     def keyPressEvent(self, event) -> None:
         super().keyPressEvent(event)
