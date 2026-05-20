@@ -123,8 +123,9 @@ class NodoCamara(Node):
         self._pub_video_segmentado = self.create_publisher(Image, "/camara/video_segmentado", QOS_VIDEO)
         self._pub_foto_anotada = self.create_publisher(Image, "/camara/foto_anotada", QOS_VIDEO)
         
+        self._estado_actual = 'BUSQUEDA'
         self._frames_botella = 0
-        self._congelado = 0
+        self._frames_vacio = 0
         
         self._ultimo_segmentado = None
 
@@ -312,10 +313,6 @@ class NodoCamara(Node):
         self._fallos_consecutivos = 0
         self._frame_count += 1
 
-        if self._congelado > 0:
-            self._congelado -= 1
-            return
-
         msg_raw_header = self.get_clock().now().to_msg()
         detections = self._inferir(frame)
         mejor_conf = 0.0
@@ -326,82 +323,100 @@ class NodoCamara(Node):
                 mejor_conf = d["conf"]
                 mejor_box = d
 
-        if mejor_box is not None and mejor_conf >= 0.65:
-            self._frames_botella += 1
-        else:
-            self._frames_botella = 0
-            try:
-                msg_raw = self._bridge.cv2_to_imgmsg(frame, encoding="bgr8")
-                msg_raw.header.stamp = msg_raw_header
-                msg_raw.header.frame_id = "camara_logitech_c270"
-                self._pub.publish(msg_raw)
-            except Exception as exc: pass
-            
-            msg_str = String()
-            msg_str.data = "vacio"
-            self._pub_analisis.publish(msg_str)
+        if self._estado_actual == 'BUSQUEDA':
+            if mejor_box is not None and mejor_conf >= 0.65:
+                self._frames_botella += 1
+            else:
+                self._frames_botella = 0
+                try:
+                    msg_raw = self._bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+                    msg_raw.header.stamp = msg_raw_header
+                    msg_raw.header.frame_id = "camara_logitech_c270"
+                    self._pub.publish(msg_raw)
+                except Exception as exc: pass
+                
+                msg_str = String()
+                msg_str.data = "vacio"
+                self._pub_analisis.publish(msg_str)
+                return
+
+            x1, y1 = int(mejor_box["x1"]), int(mejor_box["y1"])
+            x2, y2 = int(mejor_box["x2"]), int(mejor_box["y2"])
+            ancho = x2 - x1
+            alto = y2 - y1
+            area = ancho * alto
+            resultado = "grande" if area > 33000 else "chica"
+
+            if self._frames_botella < 15:
+                annotated_frame = frame.copy()
+                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(annotated_frame, f"CONF: {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                
+                try:
+                    msg_raw = self._bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
+                    msg_raw.header.stamp = msg_raw_header
+                    msg_raw.header.frame_id = "camara_logitech_c270"
+                    self._pub.publish(msg_raw)
+                except Exception as exc: pass
+
+                msg_str = String()
+                msg_str.data = "analizando"
+                self._pub_analisis.publish(msg_str)
+                return
+
+            if self._frames_botella >= 15:
+                annotated_frame = frame.copy()
+                segmentated_frame = self._aplicar_segmentacion(frame, mejor_box)
+
+                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(annotated_frame, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+                cv2.rectangle(segmentated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(segmentated_frame, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+                try:
+                    msg_anotada = self._bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
+                    msg_anotada.header.stamp = msg_raw_header
+                    msg_anotada.header.frame_id = "camara_logitech_c270"
+                    self._pub.publish(msg_anotada)
+
+                    msg_seg = self._bridge.cv2_to_imgmsg(segmentated_frame, encoding="bgr8")
+                    msg_seg.header.stamp = msg_raw_header
+                    msg_seg.header.frame_id = "camara_logitech_c270"
+                    self._pub_video_segmentado.publish(msg_seg)
+                except Exception as exc: pass
+
+                msg_tam = Float32()
+                msg_tam.data = float(area * self.k_area)
+                self._pub_tamano.publish(msg_tam)
+
+                msg_str = String()
+                msg_str.data = resultado
+                self._pub_analisis.publish(msg_str)
+
+                self._estado_actual = 'ESPERA_RETIRO'
+                self._frames_vacio = 0
+                return
+
+        elif self._estado_actual == 'ESPERA_RETIRO':
+            if mejor_box is not None and mejor_conf >= 0.40:
+                self._frames_vacio = 0
+                msg_str = String()
+                msg_str.data = "retirar"
+                self._pub_analisis.publish(msg_str)
+            else:
+                self._frames_vacio += 1
+                if self._frames_vacio >= 30:
+                    self._frames_botella = 0
+                    self._estado_actual = 'BUSQUEDA'
+                    
+                    msg_str = String()
+                    msg_str.data = "vacio"
+                    self._pub_analisis.publish(msg_str)
             return
-
-        x1, y1 = int(mejor_box["x1"]), int(mejor_box["y1"])
-        x2, y2 = int(mejor_box["x2"]), int(mejor_box["y2"])
-        ancho = x2 - x1
-        alto = y2 - y1
-        area = ancho * alto
-        resultado = "grande" if area > 33000 else "chica"
-
-        if self._frames_botella < 15:
-            annotated_frame = frame.copy()
-            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(annotated_frame, f"CONF: {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-            
-            try:
-                msg_raw = self._bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
-                msg_raw.header.stamp = msg_raw_header
-                msg_raw.header.frame_id = "camara_logitech_c270"
-                self._pub.publish(msg_raw)
-            except Exception as exc: pass
-
-            msg_str = String()
-            msg_str.data = "analizando"
-            self._pub_analisis.publish(msg_str)
-            return
-
-        if self._frames_botella >= 15:
-            annotated_frame = frame.copy()
-            segmentated_frame = self._aplicar_segmentacion(frame, mejor_box)
-
-            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(annotated_frame, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-            cv2.rectangle(segmentated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(segmentated_frame, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-            try:
-                # Se publica el RAW con box a /camara/video_raw para congelarlo
-                msg_anotada = self._bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
-                msg_anotada.header.stamp = msg_raw_header
-                msg_anotada.header.frame_id = "camara_logitech_c270"
-                self._pub.publish(msg_anotada)
-
-                msg_seg = self._bridge.cv2_to_imgmsg(segmentated_frame, encoding="bgr8")
-                msg_seg.header.stamp = msg_raw_header
-                msg_seg.header.frame_id = "camara_logitech_c270"
-                self._pub_video_segmentado.publish(msg_seg)
-            except Exception as exc: pass
-
-            msg_tam = Float32()
-            msg_tam.data = float(area * self.k_area)
-            self._pub_tamano.publish(msg_tam)
-
-            msg_str = String()
-            msg_str.data = resultado
-            self._pub_analisis.publish(msg_str)
-
-            self._congelado = 90
-            self._frames_botella = 0
 
     def destroy_node(self) -> None:
         self._timer.cancel()

@@ -28,11 +28,10 @@ WIN95_GRAY   = "#D4D0C8"
 WIN95_WHITE  = "#FFFFFF"
 WIN95_LIGHT  = "#EBEBEB"
 WIN95_SHADOW = "#808080"
-WIN95_DARK   = "#404040"
 LCD_BG       = "#001A00"
 LCD_FG       = "#00FF41"
-ANCHO_VISOR  = 320
-ALTO_VISOR   = 240
+ANCHO_VISOR  = 400
+ALTO_VISOR   = 300
 
 STYLESHEET = f"""
 QMainWindow, QWidget {{
@@ -149,7 +148,7 @@ class VentanaPrincipal(QMainWindow):
         self._nodo = nodo
         self.setWindowTitle("Dashboard Informativo")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
-        self.setFixedSize(800, 480)
+        self.setFixedSize(480, 800)
 
         self._build_ui()
         self._ultimo_peso = 0.0
@@ -183,8 +182,7 @@ class VentanaPrincipal(QMainWindow):
         self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
         layout.addWidget(self.lbl_banner)
 
-        # Videos en Grid
-        grid_videos = QGridLayout()
+        # Videos en Layout Vertical
         self.lbl_camara_raw = QLabel("[ VIDEO RAW ]")
         self.lbl_camara_raw.setObjectName("lbl_camara_raw")
         self.lbl_camara_seg = QLabel("[ VIDEO SEGMENTADO ]")
@@ -192,12 +190,11 @@ class VentanaPrincipal(QMainWindow):
         
         for lbl in (self.lbl_camara_raw, self.lbl_camara_seg):
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setFixedSize(320, 240)
+            lbl.setFixedSize(ANCHO_VISOR, ALTO_VISOR)
             lbl.setScaledContents(False)
             
-        grid_videos.addWidget(self.lbl_camara_raw, 0, 0)
-        grid_videos.addWidget(self.lbl_camara_seg, 0, 1)
-        layout.addLayout(grid_videos, stretch=3)
+        layout.addWidget(self.lbl_camara_raw, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.lbl_camara_seg, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # Panel de Metadatos Inferior
         panel_inferior = QHBoxLayout()
@@ -234,12 +231,12 @@ class VentanaPrincipal(QMainWindow):
 
     def _actualizar_raw(self, img: QImage) -> None:
         self.lbl_camara_raw.setPixmap(QPixmap.fromImage(img).scaled(
-            320, 240, Qt.AspectRatioMode.KeepAspectRatio
+            ANCHO_VISOR, ALTO_VISOR, Qt.AspectRatioMode.KeepAspectRatio
         ))
 
     def _actualizar_seg(self, img: QImage) -> None:
         self.lbl_camara_seg.setPixmap(QPixmap.fromImage(img).scaled(
-            320, 240, Qt.AspectRatioMode.KeepAspectRatio
+            ANCHO_VISOR, ALTO_VISOR, Qt.AspectRatioMode.KeepAspectRatio
         ))
 
     def _actualizar_peso(self, peso: float) -> None:
@@ -261,6 +258,9 @@ class VentanaPrincipal(QMainWindow):
         elif self._ultimo_estado == "analizando":
             self.lbl_banner.setText("ESTABILIZANDO... POR FAVOR RETIRE LA MANO.")
             self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
+        elif self._ultimo_estado == "retirar":
+            self.lbl_banner.setText("POR FAVOR, RETIRE EL ENVASE PROCESADO.")
+            self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #800000; padding: 10px;")
         elif self._ultimo_estado in ["grande", "chica"]:
             self.lbl_banner.setText("¡ANÁLISIS COMPLETADO! RETIRE BOTELLA.")
             self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #008000; padding: 10px;")
