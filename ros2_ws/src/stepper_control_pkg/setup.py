@@ -32,6 +32,7 @@ setup(
             "nodo_actuadores = stepper_control_pkg.nodo_actuadores:main",
             "nodo_camara     = stepper_control_pkg.nodo_camara:main",
             "nodo_gui        = stepper_control_pkg.nodo_gui:main",
+            "nodo_balanza    = stepper_control_pkg.nodo_balanza:main",
         ],
     },
 )

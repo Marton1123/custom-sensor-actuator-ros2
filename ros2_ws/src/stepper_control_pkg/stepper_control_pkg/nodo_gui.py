@@ -75,7 +75,16 @@ class NodoGUI(Node):
     TOPIC_CAM = "/camara/video_raw"
 
     def __init__(self) -> None:
+        """
+        Inicializa el nodo GUI, sus publicadores y suscriptores.
+        Configura los tópicos de motor, cámara y balanza.
+        """
         super().__init__("nodo_gui")
+
+        self._peso_actual = 0.0
+        self._sub_peso = self.create_subscription(
+            Float32, "/peso_botella", self._cb_peso, 10
+        )
 
         qos_cmd = QoSProfile(depth=10,
                              reliability=ReliabilityPolicy.RELIABLE,
@@ -100,6 +109,24 @@ class NodoGUI(Node):
             f"NodoGUI listo | publica '{self.TOPIC_CMD}' | "
             f"suscrito a '{self.TOPIC_CAM}' y '/analisis_botella'"
         )
+
+    def _cb_peso(self, msg: Float32) -> None:
+        """
+        Callback para actualizar el peso más reciente.
+        
+        Args:
+            msg (Float32): Mensaje con el peso actual en gramos.
+        """
+        self._peso_actual = msg.data
+
+    def get_peso(self) -> float:
+        """
+        Obtiene el último peso medido por la balanza.
+        
+        Returns:
+            float: Último peso en gramos.
+        """
+        return self._peso_actual
 
     def _cb_analisis(self, msg: String) -> None:
         with self._fn_lock:
@@ -303,6 +330,7 @@ class VentanaPrincipal(QMainWindow):
         self._flujo_activo = False
         self._esperando_retiro = False
         self._tiempo_vacio_inicio = 0.0
+        self._tamano_detectado = ""
 
         self.showFullScreen()
 
@@ -350,6 +378,13 @@ class VentanaPrincipal(QMainWindow):
         return self._lbl_display
 
     def _make_interactive_panel(self) -> QWidget:
+        """
+        Construye el panel interactivo superior.
+        Este panel muestra los mensajes de estado del sistema (Esperando botella, Analizando peso...).
+        
+        Returns:
+            QWidget: El contenedor con el panel de estado interactivo.
+        """
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(5, 5, 5, 5)
@@ -358,22 +393,7 @@ class VentanaPrincipal(QMainWindow):
         self._lbl_interactivo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_interactivo.setStyleSheet("font-size: 24px; font-weight: bold; color: #00FF00; background: #002200; padding: 10px; border: 2px solid #004400;")
         
-        btn_layout = QHBoxLayout()
-        self._btn_limpia = QPushButton("LIMPIA")
-        self._btn_limpia.setStyleSheet("background-color: #00AA00; color: white; font-size: 24px; font-weight: bold; padding: 15px;")
-        self._btn_limpia.clicked.connect(self._click_limpia)
-        self._btn_limpia.hide()
-        
-        self._btn_sucia = QPushButton("SUCIA")
-        self._btn_sucia.setStyleSheet("background-color: #AA0000; color: white; font-size: 24px; font-weight: bold; padding: 15px;")
-        self._btn_sucia.clicked.connect(self._click_sucia)
-        self._btn_sucia.hide()
-        
-        btn_layout.addWidget(self._btn_limpia)
-        btn_layout.addWidget(self._btn_sucia)
-        
         layout.addWidget(self._lbl_interactivo)
-        layout.addLayout(btn_layout)
         return panel
 
     def _make_control_group(self) -> QGroupBox:
@@ -445,6 +465,13 @@ class VentanaPrincipal(QMainWindow):
         )
 
     def _procesar_analisis(self, resultado_str: str) -> None:
+        """
+        Ciclo de vida de la GUI. Procesamiento de los resultados de visión.
+        Controla la lógica de la máquina de estados frente a los cambios.
+
+        Args:
+            resultado_str (str): Cadena enviada por el clasificador YOLO.
+        """
         if self._esperando_retiro:
             if resultado_str == "vacio":
                 if self._tiempo_vacio_inicio == 0.0:
@@ -462,30 +489,40 @@ class VentanaPrincipal(QMainWindow):
 
         if not self._flujo_activo and resultado_str in ["grande", "chica"]:
             self._flujo_activo = True
-            tamano = "Grande" if resultado_str == "grande" else "Chica"
+            self._tamano_detectado = resultado_str
             self._lbl_interactivo.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFAA00; background: #222200; padding: 10px; border: 2px solid #554400;")
-            self._lbl_interactivo.setText(f"Botella {tamano} detectada. ¿Cuál es su estado?")
-            self._btn_limpia.show()
-            self._btn_sucia.show()
+            self._lbl_interactivo.setText(f"Analizando peso... ({'Grande' if resultado_str == 'grande' else 'Chica'})")
+            
+            # Simulamos el retardo de análisis de peso con un Timer
+            QTimer.singleShot(1000, self._evaluar_peso)
 
-    def _click_limpia(self) -> None:
-        self._btn_limpia.hide()
-        self._btn_sucia.hide()
-        self._lbl_interactivo.setStyleSheet("font-size: 24px; font-weight: bold; color: #00FF00; background: #004400; padding: 10px; border: 2px solid #00AA00;")
-        self._lbl_interactivo.setText("¡Reciclaje Exitoso!")
-        QApplication.beep()
-        self._enviar(90.0)
-        self._esperando_retiro = True
-        self._tiempo_vacio_inicio = 0.0
+    def _evaluar_peso(self) -> None:
+        """
+        Evalúa el peso actual contra el tamaño detectado.
+        Si la botella está dentro del rango esperado, se mueve el motor.
+        Si la botella tiene líquido (peso excedido), se rechaza.
+        """
+        peso = self._nodo.get_peso()
+        es_limpia = False
 
-    def _click_sucia(self) -> None:
-        self._btn_limpia.hide()
-        self._btn_sucia.hide()
-        self._lbl_interactivo.setStyleSheet("font-size: 24px; font-weight: bold; color: #FF0000; background: #440000; padding: 10px; border: 2px solid #AA0000;")
-        self._lbl_interactivo.setText("Botella sucia. Por favor, retírela de la máquina.")
-        QApplication.beep()
-        self._esperando_retiro = True
-        self._tiempo_vacio_inicio = 0.0
+        if self._tamano_detectado == "chica" and peso < 40.0:
+            es_limpia = True
+        elif self._tamano_detectado == "grande" and peso < 80.0:
+            es_limpia = True
+
+        if es_limpia:
+            self._lbl_interactivo.setStyleSheet("font-size: 24px; font-weight: bold; color: #00FF00; background: #004400; padding: 10px; border: 2px solid #00AA00;")
+            self._lbl_interactivo.setText(f"¡Reciclaje Exitoso! Peso: {peso:.1f}g")
+            QApplication.beep()
+            self._enviar(90.0)
+            self._esperando_retiro = True
+            self._tiempo_vacio_inicio = 0.0
+        else:
+            self._lbl_interactivo.setStyleSheet("font-size: 24px; font-weight: bold; color: #FF0000; background: #440000; padding: 10px; border: 2px solid #AA0000;")
+            self._lbl_interactivo.setText(f"Botella con líquido ({peso:.1f}g). Vacíela.")
+            QApplication.beep()
+            self._esperando_retiro = True
+            self._tiempo_vacio_inicio = 0.0
 
     @staticmethod
     def _hline() -> QFrame:
