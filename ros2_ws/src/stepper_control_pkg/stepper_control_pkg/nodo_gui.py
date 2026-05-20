@@ -31,6 +31,8 @@ WIN95_SHADOW = "#808080"
 WIN95_DARK   = "#404040"
 LCD_BG       = "#001A00"
 LCD_FG       = "#00FF41"
+ANCHO_VISOR  = 320
+ALTO_VISOR   = 240
 
 STYLESHEET = f"""
 QMainWindow, QWidget {{
@@ -76,7 +78,6 @@ class NodoGUI(Node):
         self._fn_lock = threading.Lock()
         self._fn_frame_raw = None
         self._fn_frame_seg = None
-        self._fn_foto_anotada = None
         self._fn_peso = None
         self._fn_area = None
         self._fn_estado = None
@@ -84,7 +85,6 @@ class NodoGUI(Node):
         self._pub_comando_foto = self.create_publisher(Bool, "/comando_fotografia", 10)
         self.create_subscription(Image, "/camara/video_raw", self._cb_camara_raw, QOS_VIDEO)
         self.create_subscription(Image, "/camara/video_segmentado", self._cb_camara_seg, QOS_VIDEO)
-        self.create_subscription(Image, "/camara/foto_anotada", self._cb_foto_anotada, QOS_VIDEO)
         self.create_subscription(Float32, "/peso_botella", self._cb_peso, 10)
         self.create_subscription(Float32, "/tamano_estimado", self._cb_area, 10)
         self.create_subscription(String, "/analisis_botella", self._cb_estado, 10)
@@ -96,11 +96,10 @@ class NodoGUI(Node):
         msg.data = True
         self._pub_comando_foto.publish(msg)
 
-    def registrar_callbacks(self, fn_raw, fn_seg, fn_foto, fn_peso, fn_area, fn_estado):
+    def registrar_callbacks(self, fn_raw, fn_seg, fn_peso, fn_area, fn_estado):
         with self._fn_lock:
             self._fn_frame_raw = fn_raw
             self._fn_frame_seg = fn_seg
-            self._fn_foto_anotada = fn_foto
             self._fn_peso = fn_peso
             self._fn_area = fn_area
             self._fn_estado = fn_estado
@@ -115,13 +114,6 @@ class NodoGUI(Node):
     def _cb_camara_seg(self, msg: Image) -> None:
         with self._fn_lock:
             fn = self._fn_frame_seg
-        if fn:
-            img = self._msg_to_qimage(msg)
-            if img: fn(img)
-
-    def _cb_foto_anotada(self, msg: Image) -> None:
-        with self._fn_lock:
-            fn = self._fn_foto_anotada
         if fn:
             img = self._msg_to_qimage(msg)
             if img: fn(img)
@@ -154,7 +146,6 @@ class NodoGUI(Node):
 class VentanaPrincipal(QMainWindow):
     senal_frame_raw = pyqtSignal(QImage)
     senal_frame_seg = pyqtSignal(QImage)
-    senal_foto_anotada = pyqtSignal(QImage)
     senal_peso = pyqtSignal(float)
     senal_area = pyqtSignal(float)
     senal_estado = pyqtSignal(str)
@@ -176,7 +167,6 @@ class VentanaPrincipal(QMainWindow):
 
         self.senal_frame_raw.connect(self._actualizar_raw)
         self.senal_frame_seg.connect(self._actualizar_seg)
-        self.senal_foto_anotada.connect(self._actualizar_foto_anotada)
         self.senal_peso.connect(self._actualizar_peso)
         self.senal_area.connect(self._actualizar_area)
         self.senal_estado.connect(self._actualizar_estado)
@@ -184,7 +174,6 @@ class VentanaPrincipal(QMainWindow):
         nodo.registrar_callbacks(
             self.senal_frame_raw.emit,
             self.senal_frame_seg.emit,
-            self.senal_foto_anotada.emit,
             self.senal_peso.emit,
             self.senal_area.emit,
             self.senal_estado.emit
@@ -213,8 +202,7 @@ class VentanaPrincipal(QMainWindow):
         
         for lbl in (self.lbl_camara_raw, self.lbl_camara_seg):
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
-            lbl.setMinimumSize(1, 1)
+            lbl.setFixedSize(ANCHO_VISOR, ALTO_VISOR)
             
         grid_videos.addWidget(self.lbl_camara_raw, 0, 0)
         grid_videos.addWidget(self.lbl_camara_seg, 0, 1)
@@ -254,23 +242,15 @@ class VentanaPrincipal(QMainWindow):
         return container
 
     def _actualizar_raw(self, img: QImage) -> None:
-        if self._estado_maquina in [1, 2]:
-            if self.lbl_camara_raw.size().width() > 0 and self.lbl_camara_raw.size().height() > 0:
-                self.lbl_camara_raw.setPixmap(QPixmap.fromImage(img).scaled(
-                    self.lbl_camara_raw.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-                ))
-
-    def _actualizar_foto_anotada(self, img: QImage) -> None:
-        if self.lbl_camara_raw.size().width() > 0 and self.lbl_camara_raw.size().height() > 0:
+        if self._estado_maquina in [1, 2, 3, 4]:
             self.lbl_camara_raw.setPixmap(QPixmap.fromImage(img).scaled(
-                self.lbl_camara_raw.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+                ANCHO_VISOR, ALTO_VISOR, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
             ))
 
     def _actualizar_seg(self, img: QImage) -> None:
-        if self.lbl_camara_seg.size().width() > 0 and self.lbl_camara_seg.size().height() > 0:
-            self.lbl_camara_seg.setPixmap(QPixmap.fromImage(img).scaled(
-                self.lbl_camara_seg.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-            ))
+        self.lbl_camara_seg.setPixmap(QPixmap.fromImage(img).scaled(
+            ANCHO_VISOR, ALTO_VISOR, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+        ))
 
     def _actualizar_peso(self, peso: float) -> None:
         self._ultimo_peso = peso

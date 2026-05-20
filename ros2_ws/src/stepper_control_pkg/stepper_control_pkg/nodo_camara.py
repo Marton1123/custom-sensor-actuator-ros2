@@ -124,7 +124,7 @@ class NodoCamara(Node):
         self._pub_foto_anotada = self.create_publisher(Image, "/camara/foto_anotada", QOS_VIDEO)
         
         self._sub_comando = self.create_subscription(Bool, "/comando_fotografia", self._cb_comando_foto, 10)
-        self._tomar_foto = False
+        self._buscando_botella = False
         
         self._ultimo_segmentado = None
 
@@ -177,7 +177,7 @@ class NodoCamara(Node):
 
     def _cb_comando_foto(self, msg: Bool) -> None:
         if msg.data:
-            self._tomar_foto = True
+            self._buscando_botella = True
 
     # ── Hilo de Lectura ───────────────────────────────────────────────────
 
@@ -325,10 +325,8 @@ class NodoCamara(Node):
         except Exception as exc:
             self.get_logger().error(f"Error publicando video_raw: {exc}")
 
-        # Inferencia y Segmentación SOLO bajo demanda (Paradigma Snapshot)
-        if self._tomar_foto:
-            self._tomar_foto = False
-            
+        # Inferencia y Segmentación SOLO bajo demanda (Paradigma Snapshot con Retry)
+        if self._buscando_botella:
             detections = self._inferir(frame)
             mejor_conf = 0.0
             mejor_box = None
@@ -338,11 +336,13 @@ class NodoCamara(Node):
                     mejor_conf = d["conf"]
                     mejor_box = d
 
-            resultado = "vacio"
-            annotated_frame = frame.copy()
-            segmentated_frame = frame.copy()
-
+            # Solo procesar y detener la busqueda si encontramos la botella claramente
             if mejor_box is not None and mejor_conf >= 0.65:
+                self._buscando_botella = False
+
+                resultado = "vacio"
+                annotated_frame = frame.copy()
+                
                 x1, y1 = int(mejor_box["x1"]), int(mejor_box["y1"])
                 x2, y2 = int(mejor_box["x2"]), int(mejor_box["y2"])
                 ancho = x2 - x1
@@ -358,26 +358,32 @@ class NodoCamara(Node):
                 # Aplicar segmentacion K-Means sobre el ROI (con optimización de CPU)
                 segmentated_frame = self._aplicar_segmentacion(frame, mejor_box)
 
+                # Dibujar BBox en el frame original (RAW) anotado
                 cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.putText(annotated_frame, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-            msg_str = String()
-            msg_str.data = resultado
-            self._pub_analisis.publish(msg_str)
+                # Regresión Visual: Dibujar la misma BBox en la mascara segmentada
+                cv2.rectangle(segmentated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(segmentated_frame, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-            try:
-                # Publicar Foto Anotada
-                msg_anotada = self._bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
-                msg_anotada.header = msg_raw.header
-                self._pub_foto_anotada.publish(msg_anotada)
+                msg_str = String()
+                msg_str.data = resultado
+                self._pub_analisis.publish(msg_str)
 
-                # Publicar Foto Segmentada
-                msg_seg = self._bridge.cv2_to_imgmsg(segmentated_frame, encoding="bgr8")
-                msg_seg.header = msg_raw.header
-                self._pub_video_segmentado.publish(msg_seg)
-            except Exception as exc:
-                self.get_logger().error(f"Error publicando frames fotograficos: {exc}")
+                try:
+                    # Publicar Foto Anotada
+                    msg_anotada = self._bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
+                    msg_anotada.header = msg_raw.header
+                    self._pub_foto_anotada.publish(msg_anotada)
+
+                    # Publicar Foto Segmentada
+                    msg_seg = self._bridge.cv2_to_imgmsg(segmentated_frame, encoding="bgr8")
+                    msg_seg.header = msg_raw.header
+                    self._pub_video_segmentado.publish(msg_seg)
+                except Exception as exc:
+                    self.get_logger().error(f"Error publicando frames fotograficos: {exc}")
 
     def destroy_node(self) -> None:
         self._timer.cancel()
