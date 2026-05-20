@@ -117,6 +117,8 @@ class VentanaPrincipal(QMainWindow):
         self.setStyleSheet("background-color: #0f172a; color: #f8fafc; font-family: sans-serif;")
 
         self._build_ui()
+        self._ultimo_peso = 0.0
+        self._ultimo_estado = "vacio"
 
         self.senal_frame_raw.connect(self._actualizar_raw)
         self.senal_frame_seg.connect(self._actualizar_seg)
@@ -139,11 +141,11 @@ class VentanaPrincipal(QMainWindow):
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
         
-        # Título
-        titulo = QLabel("MONITOREO DE VISIÓN Y SENSORES")
-        titulo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        titulo.setStyleSheet("font-size: 24px; font-weight: bold; color: #38bdf8; margin: 10px;")
-        layout.addWidget(titulo)
+        # Banner UX Superior
+        self.lbl_banner = QLabel("Esperando botella... Ingrese su envase.")
+        self.lbl_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_banner.setStyleSheet("font-size: 28px; font-weight: bold; color: #FFFFFF; background-color: #475569; padding: 20px;")
+        layout.addWidget(self.lbl_banner)
 
         # Videos en Grid
         grid_videos = QGridLayout()
@@ -153,7 +155,7 @@ class VentanaPrincipal(QMainWindow):
         for lbl in (self.lbl_camara_raw, self.lbl_camara_seg):
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setStyleSheet("background-color: #000000; border: 2px solid #334155;")
-            lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
             
         grid_videos.addWidget(self.lbl_camara_raw, 0, 0)
         grid_videos.addWidget(self.lbl_camara_seg, 0, 1)
@@ -193,22 +195,27 @@ class VentanaPrincipal(QMainWindow):
         return container
 
     def _actualizar_raw(self, img: QImage) -> None:
-        self.lbl_camara_raw.setPixmap(QPixmap.fromImage(img).scaled(
-            self.lbl_camara_raw.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-        ))
+        if self.lbl_camara_raw.size().width() > 0 and self.lbl_camara_raw.size().height() > 0:
+            self.lbl_camara_raw.setPixmap(QPixmap.fromImage(img).scaled(
+                self.lbl_camara_raw.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+            ))
 
     def _actualizar_seg(self, img: QImage) -> None:
-        self.lbl_camara_seg.setPixmap(QPixmap.fromImage(img).scaled(
-            self.lbl_camara_seg.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-        ))
+        if self.lbl_camara_seg.size().width() > 0 and self.lbl_camara_seg.size().height() > 0:
+            self.lbl_camara_seg.setPixmap(QPixmap.fromImage(img).scaled(
+                self.lbl_camara_seg.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+            ))
 
     def _actualizar_peso(self, peso: float) -> None:
+        self._ultimo_peso = peso
         self.lbl_peso.valor_label.setText(f"{peso:.1f}")
+        self._evaluar_banner()
 
     def _actualizar_area(self, area: float) -> None:
         self.lbl_area.valor_label.setText(f"{area:.1f}")
 
     def _actualizar_estado(self, estado: str) -> None:
+        self._ultimo_estado = estado
         self.lbl_estado.valor_label.setText(estado.upper())
         if estado.lower() == "vacio":
             self.lbl_estado.valor_label.setStyleSheet("font-size: 32px; font-weight: bold; color: #94a3b8;")
@@ -216,6 +223,26 @@ class VentanaPrincipal(QMainWindow):
             self.lbl_estado.valor_label.setStyleSheet("font-size: 32px; font-weight: bold; color: #facc15;")
         else:
             self.lbl_estado.valor_label.setStyleSheet("font-size: 32px; font-weight: bold; color: #ef4444;")
+        self._evaluar_banner()
+
+    def _evaluar_banner(self) -> None:
+        peso = self._ultimo_peso
+        estado = self._ultimo_estado.lower()
+
+        if peso < 10.0:
+            self.lbl_banner.setText("Esperando botella... Ingrese su envase.")
+            self.lbl_banner.setStyleSheet("font-size: 28px; font-weight: bold; color: #FFFFFF; background-color: #475569; padding: 20px;")
+        else:
+            if estado in ["grande", "chica"]:
+                if (estado == "chica" and peso < 40.0) or (estado == "grande" and peso < 80.0):
+                    self.lbl_banner.setText("¡La botella está perfecta! Proceso realizado.")
+                    self.lbl_banner.setStyleSheet("font-size: 28px; font-weight: bold; color: #FFFFFF; background-color: #22c55e; padding: 20px;")
+                else:
+                    self.lbl_banner.setText("La botella presenta suciedad. Favor retirarla de la máquina.")
+                    self.lbl_banner.setStyleSheet("font-size: 28px; font-weight: bold; color: #FFFFFF; background-color: #ef4444; padding: 20px;")
+            else:
+                self.lbl_banner.setText("Analizando botella... Por favor espere.")
+                self.lbl_banner.setStyleSheet("font-size: 28px; font-weight: bold; color: #000000; background-color: #facc15; padding: 20px;")
 
     def keyPressEvent(self, event) -> None:
         super().keyPressEvent(event)
