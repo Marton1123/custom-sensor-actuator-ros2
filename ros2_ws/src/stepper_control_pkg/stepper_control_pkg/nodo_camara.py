@@ -129,6 +129,7 @@ class NodoCamara(Node):
         self.declare_parameter("iou_threshold", 0.45)
         self.declare_parameter("ncnn_threads", 2)
         self.declare_parameter("ncnn_input_size", 640)
+        self.declare_parameter("distancia_camara_cm", 60.0)
         
         self.modelo_path = str(self.get_parameter("modelo_ncnn").value)
         self.k_area = float(self.get_parameter("k_area").value)
@@ -136,6 +137,7 @@ class NodoCamara(Node):
         self.iou_threshold = float(self.get_parameter("iou_threshold").value)
         self.ncnn_threads = int(self.get_parameter("ncnn_threads").value)
         self.ncnn_input_size = int(self.get_parameter("ncnn_input_size").value)
+        self.distancia_camara_cm = float(self.get_parameter("distancia_camara_cm").value)
 
         if not os.path.exists(self.modelo_path):
             self.get_logger().error(f"La carpeta del modelo NCNN no existe en la ruta: {self.modelo_path}")

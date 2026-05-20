@@ -16,11 +16,15 @@ Parametros sobreescribibles:
     ros2 launch stepper_control_pkg main_launch.py delay_pulso:=0.001
 """
 
+import os
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
 
 def generate_launch_description() -> LaunchDescription:
+    pkg_share = get_package_share_directory('stepper_control_pkg')
+    config_path = os.path.join(pkg_share, 'config', 'parametros.yaml')
 
     nodo_actuadores = Node(
         package="stepper_control_pkg",
@@ -45,6 +49,7 @@ def generate_launch_description() -> LaunchDescription:
         name="nodo_camara",
         output="screen",
         emulate_tty=True,
+        parameters=[config_path]
         # /dev/video0 se hereda del entorno; el usuario debe pertenecer al grupo 'video'
     )
 
@@ -63,6 +68,7 @@ def generate_launch_description() -> LaunchDescription:
         name="nodo_balanza",
         output="screen",
         emulate_tty=True,
+        parameters=[config_path]
     )
 
     return LaunchDescription([

@@ -125,8 +125,9 @@ class NodoBalanza(Node):
 
         self._pub_peso = self.create_publisher(Float32, '/peso_botella', 10)
         
-        # Factor de calibración de clase
-        self._reference_unit = 2273.9
+        # Factor de calibración de clase por parámetro
+        self.declare_parameter("hx711_reference_unit", 2273.9)
+        self._reference_unit = float(self.get_parameter("hx711_reference_unit").value)
         self._hx711 = None
         
         # Rutina de Inicialización (Hardware Real y Tara Automática)
@@ -139,7 +140,7 @@ class NodoBalanza(Node):
             offset_inicial = self._hx711.read_average(times=10)
             self._hx711.set_offset(offset_inicial)
             self.get_logger().info(f"Tara completada. Offset configurado: {offset_inicial:.1f}")
-            self.get_logger().info('Balanza calibrada. Factor: 2273.9')
+            self.get_logger().info(f'Balanza calibrada. Factor: {self._reference_unit}')
             
         except Exception as e:
             self.get_logger().error(f"Fallo al inicializar el hardware HX711: {e}")
