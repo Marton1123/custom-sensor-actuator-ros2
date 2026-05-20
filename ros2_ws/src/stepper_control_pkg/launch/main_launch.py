@@ -1,7 +1,7 @@
 """
-kiosco_launch.py
-================
-Launch file de produccion (Modo Kiosco) para stepper_control_pkg.
+main_launch.py
+==============
+Launch file de produccion (Modo Produccion) para stepper_control_pkg.
 
 Lanza cuatro nodos en el mismo proceso de ROS 2:
     1. nodo_actuadores  — control GPIO del motor NEMA 17 (lgpio)
@@ -10,10 +10,10 @@ Lanza cuatro nodos en el mismo proceso de ROS 2:
     4. nodo_balanza     — lee peso de la celda de carga HX711, publica /peso_botella
 
 Uso:
-    ros2 launch stepper_control_pkg kiosco_launch.py
+    ros2 launch stepper_control_pkg main_launch.py
 
 Parametros sobreescribibles:
-    ros2 launch stepper_control_pkg kiosco_launch.py delay_pulso:=0.001
+    ros2 launch stepper_control_pkg main_launch.py delay_pulso:=0.001
 """
 
 from launch import LaunchDescription

@@ -13,7 +13,7 @@ setup(
         ("share/ament_index/resource_index/packages", ["resource/" + PACKAGE_NAME]),
         # package.xml (obligatorio)
         ("share/" + PACKAGE_NAME, ["package.xml"]),
-        # Archivos launch — *.py captura kiosco_launch.py y cualquier futuro launch
+        # Archivos launch — *.py captura main_launch.py y cualquier futuro launch
         (os.path.join("share", PACKAGE_NAME, "launch"), glob("launch/*.py")),
         # Archivos de configuración YAML (si los hay)
         (os.path.join("share", PACKAGE_NAME, "config"), glob("config/*.yaml")),
