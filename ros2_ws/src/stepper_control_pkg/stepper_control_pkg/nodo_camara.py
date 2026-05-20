@@ -359,29 +359,29 @@ class NodoCamara(Node):
                 return
 
             if self._frames_botella >= 15:
-                frame_raw_limpio = frame.copy()
-                segmentated_frame, estado_limpieza = self._aplicar_segmentacion(frame_raw_limpio, mejor_box)
+                img_raw = frame.copy()
+                img_seg, estado_limpieza = self._aplicar_segmentacion(frame.copy(), mejor_box)
                 
                 self._ultimo_veredicto = f"Botella {resultado.upper()} {estado_limpieza}"
 
-                cv2.rectangle(frame_raw_limpio, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(frame_raw_limpio, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
+                cv2.rectangle(img_raw, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(img_raw, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-                cv2.rectangle(segmentated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(segmentated_frame, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
+                cv2.rectangle(img_seg, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(img_seg, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
                 try:
-                    msg_anotada = self._bridge.cv2_to_imgmsg(frame_raw_limpio, encoding="bgr8")
-                    msg_anotada.header.stamp = msg_raw_header
-                    msg_anotada.header.frame_id = "camara_logitech_c270"
-                    self._pub.publish(msg_anotada)
+                    msg_raw_pub = self._bridge.cv2_to_imgmsg(img_raw, encoding="bgr8")
+                    msg_raw_pub.header.stamp = msg_raw_header
+                    msg_raw_pub.header.frame_id = "camara_logitech_c270"
+                    self._pub.publish(msg_raw_pub)
 
-                    msg_seg = self._bridge.cv2_to_imgmsg(segmentated_frame, encoding="bgr8")
-                    msg_seg.header.stamp = msg_raw_header
-                    msg_seg.header.frame_id = "camara_logitech_c270"
-                    self._pub_video_segmentado.publish(msg_seg)
+                    msg_segmentado = self._bridge.cv2_to_imgmsg(img_seg, encoding="bgr8")
+                    msg_segmentado.header.stamp = msg_raw_header
+                    msg_segmentado.header.frame_id = "camara_logitech_c270"
+                    self._pub_video_segmentado.publish(msg_segmentado)
                 except Exception as exc: pass
 
                 msg_tam = Float32()
@@ -410,6 +410,16 @@ class NodoCamara(Node):
                 if self._frames_vacio >= 30:
                     self._frames_botella = 0
                     self._estado_actual = 'BUSQUEDA'
+                    
+                    # Limpiar visores con imagen negra
+                    frame_negro = np.zeros((480, 640, 3), dtype=np.uint8)
+                    try:
+                        msg_negro = self._bridge.cv2_to_imgmsg(frame_negro, encoding="bgr8")
+                        msg_negro.header.stamp = self.get_clock().now().to_msg()
+                        msg_negro.header.frame_id = "camara_logitech_c270"
+                        self._pub_video_segmentado.publish(msg_negro)
+                        self._pub.publish(msg_negro)
+                    except Exception: pass
                     
                     msg_str = String()
                     msg_str.data = "vacio"
