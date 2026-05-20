@@ -16,7 +16,7 @@ import numpy as np
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
+from std_msgs.msg import String, Float32
 from cv_bridge import CvBridge
 
 QOS_VIDEO = QoSProfile(
@@ -119,6 +119,7 @@ class NodoCamara(Node):
         self._bridge  = CvBridge()
         self._pub     = self.create_publisher(Image, "/camara/video_raw", QOS_VIDEO)
         self._pub_analisis = self.create_publisher(String, "/analisis_botella", 10)
+        self._pub_tamano = self.create_publisher(Float32, "/tamano_estimado", 10)
 
         # Parametros de IA (NCNN)
         default_model_path = os.path.expanduser("~/custom-sensor-actuator-ros2/IA/models/botellas_ncnn_model")
@@ -203,6 +204,27 @@ class NodoCamara(Node):
 
     # ── Timer callback ────────────────────────────────────────────────────
 
+    def _inferir(self, frame_bgr: np.ndarray) -> list[dict]:
+        """Preprocesa, corre inferencia NCNN nativa y decodifica detecciones."""
+        if self.net is None:
+            return []
+
+        img_lb, scale, pad_w, pad_h = letterbox(frame_bgr, self.ncnn_input_size)
+        img_rgb = cv2.cvtColor(img_lb, cv2.COLOR_BGR2RGB)
+        img_f32 = img_rgb.astype(np.float32) / 255.0
+        img_chw = np.ascontiguousarray(img_f32.transpose(2, 0, 1))
+        mat_in = ncnn.Mat(img_chw)
+        
+        with self.net.create_extractor() as ex:
+            ex.set_light_mode(True)
+            ex.input("in0", mat_in)
+            ret, mat_out = ex.extract("out0")
+        
+        if ret == 0:
+            raw = np.array(mat_out)
+            return parse_yolov8_output(raw, self.conf_threshold, self.iou_threshold, scale, pad_w, pad_h)
+        return []
+
     def _publicar_frame(self) -> None:
         if not self._captura.isOpened():
             self._fallos_consecutivos += 1
@@ -231,25 +253,9 @@ class NodoCamara(Node):
 
         # --- FRAME SKIPPING e INFERENCIA NCNN ---
         if self._frame_count % 5 == 1 or self._ultima_caja is None:
+            detections = self._inferir(frame)
             mejor_conf = 0.0
             mejor_box = None
-            detections = []
-
-            if self.net is not None:
-                img_lb, scale, pad_w, pad_h = letterbox(frame, self.ncnn_input_size)
-                img_rgb = cv2.cvtColor(img_lb, cv2.COLOR_BGR2RGB)
-                img_f32 = img_rgb.astype(np.float32) / 255.0
-                img_chw = np.ascontiguousarray(img_f32.transpose(2, 0, 1))
-                mat_in = ncnn.Mat(img_chw)
-                
-                with self.net.create_extractor() as ex:
-                    ex.set_light_mode(True)
-                    ex.input("in0", mat_in)
-                    ret, mat_out = ex.extract("out0")
-                
-                if ret == 0:
-                    raw = np.array(mat_out)
-                    detections = parse_yolov8_output(raw, self.conf_threshold, self.iou_threshold, scale, pad_w, pad_h)
 
             for d in detections:
                 if d["conf"] > mejor_conf:
@@ -266,6 +272,11 @@ class NodoCamara(Node):
                 alto = y2 - y1
                 area = ancho * alto
                 resultado = "grande" if area > 33000 else "chica"
+
+                # Publicar área física estimada (Lo mejor de nodo_vision)
+                msg_tam = Float32()
+                msg_tam.data = float(area * self.k_area)
+                self._pub_tamano.publish(msg_tam)
 
                 cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.putText(annotated_frame, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
