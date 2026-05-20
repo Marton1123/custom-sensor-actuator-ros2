@@ -3,10 +3,11 @@ kiosco_launch.py
 ================
 Launch file de produccion (Modo Kiosco) para stepper_control_pkg.
 
-Lanza tres nodos en el mismo proceso de ROS 2:
+Lanza cuatro nodos en el mismo proceso de ROS 2:
     1. nodo_actuadores  — control GPIO del motor NEMA 17 (lgpio)
     2. nodo_camara      — captura video Logitech C270, publica /camara/video_raw
     3. nodo_gui         — interfaz tacil PyQt6, suscrito a /camara/video_raw
+    4. nodo_balanza     — lee peso de la celda de carga HX711, publica /peso_botella
 
 Uso:
     ros2 launch stepper_control_pkg kiosco_launch.py
@@ -56,8 +57,17 @@ def generate_launch_description() -> LaunchDescription:
         # DISPLAY=:0 se hereda del entorno de autostart GNOME
     )
 
+    nodo_balanza = Node(
+        package="stepper_control_pkg",
+        executable="nodo_balanza",
+        name="nodo_balanza",
+        output="screen",
+        emulate_tty=True,
+    )
+
     return LaunchDescription([
         nodo_actuadores,
         nodo_camara,
         nodo_gui,
+        nodo_balanza,
     ])
