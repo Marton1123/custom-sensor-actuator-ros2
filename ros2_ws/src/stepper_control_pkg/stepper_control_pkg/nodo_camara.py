@@ -236,21 +236,6 @@ class NodoCamara(Node):
             return parse_yolov8_output(raw, self.conf_threshold, self.iou_threshold, scale, pad_w, pad_h)
         return []
 
-    def _aplicar_segmentacion(self, frame_bgr: np.ndarray, bbox: dict) -> np.ndarray:
-        """
-        Aplica K-Means Clustering en el ROI para segmentar anomalias (suciedad).
-        Optimizacion: Submuestreo agresivo a 64x64 previo a K-Means.
-        """
-        x1 = max(0, int(bbox["x1"]))
-        y1 = max(0, int(bbox["y1"]))
-        x2 = min(frame_bgr.shape[1], int(bbox["x2"]))
-        y2 = min(frame_bgr.shape[0], int(bbox["y2"]))
-        
-        ancho_roi = x2 - x1
-        alto_roi = y2 - y1
-
-        # Validar dimensiones minimas del ROI
-        if ancho_roi < 10 or alto_roi < 10:
     def _aplicar_segmentacion(self, frame_bgr: np.ndarray, bbox: dict) -> tuple:
         x1, y1 = int(bbox["x1"]), int(bbox["y1"])
         x2, y2 = int(bbox["x2"]), int(bbox["y2"])
