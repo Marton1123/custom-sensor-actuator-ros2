@@ -21,9 +21,43 @@ from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QSizePolicy,
+    QLabel, QSizePolicy, QFrame
 )
 
+WIN95_GRAY   = "#D4D0C8"
+WIN95_WHITE  = "#FFFFFF"
+WIN95_LIGHT  = "#EBEBEB"
+WIN95_SHADOW = "#808080"
+WIN95_DARK   = "#404040"
+LCD_BG       = "#001A00"
+LCD_FG       = "#00FF41"
+
+STYLESHEET = f"""
+QMainWindow, QWidget {{
+    background-color: {WIN95_GRAY};
+    color: #000000;
+    font-family: "Arial", "MS Sans Serif", sans-serif;
+}}
+QLabel {{
+    color: #000000;
+}}
+QLabel#lbl_banner {{
+    border-top:    3px solid {WIN95_SHADOW};
+    border-left:   3px solid {WIN95_SHADOW};
+    border-bottom: 3px solid {WIN95_WHITE};
+    border-right:  3px solid {WIN95_WHITE};
+}}
+QLabel#lbl_camara_raw, QLabel#lbl_camara_seg {{
+    background-color: #000000;
+    border-top:    4px solid {WIN95_DARK};
+    border-left:   4px solid {WIN95_DARK};
+    border-bottom: 4px solid {WIN95_WHITE};
+    border-right:  4px solid {WIN95_WHITE};
+}}
+QFrame[frameShape="4"], QFrame[frameShape="5"] {{
+    color: {WIN95_SHADOW};
+}}
+"""
 
 QOS_VIDEO = QoSProfile(
     depth=1,
@@ -114,7 +148,6 @@ class VentanaPrincipal(QMainWindow):
         self.setWindowTitle("Dashboard Informativo")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setWindowState(Qt.WindowState.WindowFullScreen)
-        self.setStyleSheet("background-color: #0f172a; color: #f8fafc; font-family: sans-serif;")
 
         self._build_ui()
         self._ultimo_peso = 0.0
@@ -143,19 +176,22 @@ class VentanaPrincipal(QMainWindow):
         
         # Banner UX Superior
         self.lbl_banner = QLabel("Esperando botella... Ingrese su envase.")
+        self.lbl_banner.setObjectName("lbl_banner")
         self.lbl_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_banner.setStyleSheet("font-size: 28px; font-weight: bold; color: #FFFFFF; background-color: #475569; padding: 20px;")
+        self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
         layout.addWidget(self.lbl_banner)
 
         # Videos en Grid
         grid_videos = QGridLayout()
         self.lbl_camara_raw = QLabel("[ VIDEO RAW ]")
+        self.lbl_camara_raw.setObjectName("lbl_camara_raw")
         self.lbl_camara_seg = QLabel("[ VIDEO SEGMENTADO ]")
+        self.lbl_camara_seg.setObjectName("lbl_camara_seg")
         
         for lbl in (self.lbl_camara_raw, self.lbl_camara_seg):
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet("background-color: #000000; border: 2px solid #334155;")
             lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+            lbl.setMinimumSize(1, 1)
             
         grid_videos.addWidget(self.lbl_camara_raw, 0, 0)
         grid_videos.addWidget(self.lbl_camara_seg, 0, 1)
@@ -180,18 +216,18 @@ class VentanaPrincipal(QMainWindow):
         
         lbl_tit = QLabel(titulo)
         lbl_tit.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_tit.setStyleSheet("font-size: 16px; color: #94a3b8;")
+        lbl_tit.setStyleSheet("font-size: 14px; font-weight: bold; color: #000000;")
         
         lbl_val = QLabel(valor)
         lbl_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_val.setStyleSheet("font-size: 32px; font-weight: bold; color: #4ade80;")
+        lbl_val.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {LCD_FG}; background-color: {LCD_BG}; padding: 5px; border: 2px inset {WIN95_SHADOW};")
         
         layout.addWidget(lbl_tit)
         layout.addWidget(lbl_val)
         
         # Guardamos la referencia dinámica en el contenedor para poder modificarla después
         container.valor_label = lbl_val
-        container.setStyleSheet("background-color: #1e293b; border-radius: 10px; margin: 5px;")
+        container.setStyleSheet(f"background-color: {WIN95_GRAY}; border: 2px outset {WIN95_WHITE}; margin: 2px;")
         return container
 
     def _actualizar_raw(self, img: QImage) -> None:
@@ -217,12 +253,6 @@ class VentanaPrincipal(QMainWindow):
     def _actualizar_estado(self, estado: str) -> None:
         self._ultimo_estado = estado
         self.lbl_estado.valor_label.setText(estado.upper())
-        if estado.lower() == "vacio":
-            self.lbl_estado.valor_label.setStyleSheet("font-size: 32px; font-weight: bold; color: #94a3b8;")
-        elif estado.lower() in ["grande", "chica"]:
-            self.lbl_estado.valor_label.setStyleSheet("font-size: 32px; font-weight: bold; color: #facc15;")
-        else:
-            self.lbl_estado.valor_label.setStyleSheet("font-size: 32px; font-weight: bold; color: #ef4444;")
         self._evaluar_banner()
 
     def _evaluar_banner(self) -> None:
@@ -231,18 +261,18 @@ class VentanaPrincipal(QMainWindow):
 
         if peso < 10.0:
             self.lbl_banner.setText("Esperando botella... Ingrese su envase.")
-            self.lbl_banner.setStyleSheet("font-size: 28px; font-weight: bold; color: #FFFFFF; background-color: #475569; padding: 20px;")
+            self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
         else:
             if estado in ["grande", "chica"]:
                 if (estado == "chica" and peso < 40.0) or (estado == "grande" and peso < 80.0):
                     self.lbl_banner.setText("¡La botella está perfecta! Proceso realizado.")
-                    self.lbl_banner.setStyleSheet("font-size: 28px; font-weight: bold; color: #FFFFFF; background-color: #22c55e; padding: 20px;")
+                    self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #008000; padding: 10px;")
                 else:
                     self.lbl_banner.setText("La botella presenta suciedad. Favor retirarla de la máquina.")
-                    self.lbl_banner.setStyleSheet("font-size: 28px; font-weight: bold; color: #FFFFFF; background-color: #ef4444; padding: 20px;")
+                    self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #800000; padding: 10px;")
             else:
                 self.lbl_banner.setText("Analizando botella... Por favor espere.")
-                self.lbl_banner.setStyleSheet("font-size: 28px; font-weight: bold; color: #000000; background-color: #facc15; padding: 20px;")
+                self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
 
     def keyPressEvent(self, event) -> None:
         super().keyPressEvent(event)
@@ -251,6 +281,7 @@ def main(args=None) -> None:
     rclpy.init(args=args)
     nodo = NodoGUI()
     app = QApplication(sys.argv)
+    app.setStyleSheet(STYLESHEET)
     ventana = VentanaPrincipal(nodo)
 
     executor = rclpy.executors.SingleThreadedExecutor()
