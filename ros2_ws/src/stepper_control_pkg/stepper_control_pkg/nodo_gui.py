@@ -149,8 +149,6 @@ class VentanaPrincipal(QMainWindow):
         self._nodo = nodo
         self.setWindowTitle("Dashboard Informativo")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
-        self.setFixedSize(480, 800)
-
         self._build_ui()
         self._ultimo_peso = 0.0
         self._ultimo_estado = "vacio"
@@ -171,6 +169,8 @@ class VentanaPrincipal(QMainWindow):
 
         self.showFullScreen()
 
+        self.showFullScreen()
+
     def _build_ui(self) -> None:
         root = QWidget()
         self.setCentralWidget(root)
@@ -184,6 +184,7 @@ class VentanaPrincipal(QMainWindow):
         layout.addWidget(self.lbl_banner)
 
         # Videos en Layout Vertical
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_camara_raw = QLabel("[ VIDEO RAW ]")
         self.lbl_camara_raw.setObjectName("lbl_camara_raw")
         self.lbl_camara_seg = QLabel("[ VIDEO SEGMENTADO ]")
@@ -248,8 +249,8 @@ class VentanaPrincipal(QMainWindow):
         self.lbl_area.valor_label.setText(f"{area:.1f}")
 
     def _actualizar_estado(self, estado: str) -> None:
-        self._ultimo_estado = estado.lower()
-        self.lbl_estado.valor_label.setText(estado.upper())
+        self._ultimo_estado = estado
+        self.lbl_estado.valor_label.setText(estado.upper().split()[0] if " " in estado else estado.upper())
         
         if self._ultimo_estado == "vacio":
             self.lbl_banner.setText("ESPERANDO BOTELLA... INGRESE SU ENVASE.")
@@ -259,12 +260,14 @@ class VentanaPrincipal(QMainWindow):
         elif self._ultimo_estado == "analizando":
             self.lbl_banner.setText("ESTABILIZANDO... POR FAVOR RETIRE LA MANO.")
             self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
-        elif self._ultimo_estado == "retirar":
-            self.lbl_banner.setText("POR FAVOR, RETIRE EL ENVASE PROCESADO.")
-            self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #800000; padding: 10px;")
-        elif self._ultimo_estado in ["grande", "chica"]:
-            self.lbl_banner.setText("¡ANÁLISIS COMPLETADO! RETIRE BOTELLA.")
-            self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #008000; padding: 10px;")
+        else:
+            if "LIMPIA" in self._ultimo_estado:
+                self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #008000; padding: 10px;")
+            elif "SUCIA" in self._ultimo_estado:
+                self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #800000; padding: 10px;")
+            else:
+                self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
+            self.lbl_banner.setText(self._ultimo_estado)
 
     def keyPressEvent(self, event) -> None:
         super().keyPressEvent(event)

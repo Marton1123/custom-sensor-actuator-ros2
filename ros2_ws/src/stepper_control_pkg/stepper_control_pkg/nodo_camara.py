@@ -126,6 +126,7 @@ class NodoCamara(Node):
         self._estado_actual = 'BUSQUEDA'
         self._frames_botella = 0
         self._frames_vacio = 0
+        self._ultimo_veredicto = ""
         
         self._ultimo_segmentado = None
 
@@ -368,6 +369,22 @@ class NodoCamara(Node):
             if self._frames_botella >= 15:
                 annotated_frame = frame.copy()
                 segmentated_frame = self._aplicar_segmentacion(frame, mejor_box)
+                
+                gray = cv2.cvtColor(segmentated_frame, cv2.COLOR_BGR2GRAY)
+                mask = gray > 0
+                bottle_pixels = segmentated_frame[mask]
+                import numpy as np
+                if bottle_pixels.size > 0:
+                    unique, counts = np.unique(bottle_pixels.reshape(-1, 3), axis=0, return_counts=True)
+                    if len(counts) > 0:
+                        max_color_ratio = np.max(counts) / np.sum(counts)
+                        estado_limpieza = "LIMPIA" if max_color_ratio > 0.85 else "SUCIA"
+                    else:
+                        estado_limpieza = "LIMPIA"
+                else:
+                    estado_limpieza = "LIMPIA"
+                
+                self._ultimo_veredicto = f"Botella {resultado.upper()} {estado_limpieza}"
 
                 cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.putText(annotated_frame, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
@@ -394,7 +411,7 @@ class NodoCamara(Node):
                 self._pub_tamano.publish(msg_tam)
 
                 msg_str = String()
-                msg_str.data = resultado
+                msg_str.data = self._ultimo_veredicto
                 self._pub_analisis.publish(msg_str)
 
                 self._estado_actual = 'ESPERA_RETIRO'
@@ -405,7 +422,10 @@ class NodoCamara(Node):
             if mejor_box is not None and mejor_conf >= 0.40:
                 self._frames_vacio = 0
                 msg_str = String()
-                msg_str.data = "retirar"
+                if "LIMPIA" in self._ultimo_veredicto:
+                    msg_str.data = f"{self._ultimo_veredicto}\nProcesando reciclaje... (Esperando que desaparezca)"
+                else:
+                    msg_str.data = f"{self._ultimo_veredicto}\nPor favor, retire el envase de la máquina."
                 self._pub_analisis.publish(msg_str)
             else:
                 self._frames_vacio += 1
