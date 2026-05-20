@@ -251,42 +251,48 @@ class NodoCamara(Node):
 
         # Validar dimensiones minimas del ROI
         if ancho_roi < 10 or alto_roi < 10:
-            return frame_bgr.copy()
+    def _aplicar_segmentacion(self, frame_bgr: np.ndarray, bbox: dict) -> tuple:
+        x1, y1 = int(bbox["x1"]), int(bbox["y1"])
+        x2, y2 = int(bbox["x2"]), int(bbox["y2"])
+
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(frame_bgr.shape[1], x2)
+        y2 = min(frame_bgr.shape[0], y2)
+
+        if (x2 <= x1) or (y2 <= y1):
+            return frame_bgr.copy(), "LIMPIA"
 
         roi = frame_bgr[y1:y2, x1:x2]
-        
-        # DOWN-SAMPLING (64x64) para evitar cuello de botella de CPU
-        roi_pequeno = cv2.resize(roi, (64, 64), interpolation=cv2.INTER_LINEAR)
-        
-        # Mitigación de sombras: Difuminado y conversión a HSV sobre la miniatura
-        blur = cv2.GaussianBlur(roi_pequeno, (5, 5), 0)
-        roi_hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
-        
-        # Aplanar imagen para K-Means: (N, 3)
-        pixel_values = roi_hsv.reshape((-1, 3))
-        pixel_values = np.float32(pixel_values)
 
-        # Criterios y K-Means relajados (máx 10 iteraciones, epsilon 1.0)
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
-        K = 3
-        _, labels, centers = cv2.kmeans(pixel_values, K, None, criteria, 3, cv2.KMEANS_RANDOM_CENTERS)
-        
-        # Convertir centros a 8 bit y reconstruir miniatura
-        centers = np.uint8(centers)
-        segmented_data = centers[labels.flatten()]
-        segmented_roi_hsv = segmented_data.reshape((64, 64, 3))
-        
-        # Volver a BGR para visualizacion
-        segmented_roi_bgr = cv2.cvtColor(segmented_roi_hsv, cv2.COLOR_HSV2BGR)
-        
-        # UP-SAMPLING (restaurar al tamaño original del ROI sin difuminar bordes)
-        segmented_roi_bgr_large = cv2.resize(segmented_roi_bgr, (ancho_roi, alto_roi), interpolation=cv2.INTER_NEAREST)
+        roi_hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
-        # Reconstrucción sobre un canvas (frame original oscurecido para resaltar el ROI segmentado)
+        # Filtro de opacidad/suciedad (Value bajo)
+        mask_dark = cv2.inRange(roi_hsv, np.array([0, 0, 0]), np.array([179, 255, 80]))
+
+        # Filtro de liquidos/etiquetas (Saturacion alta)
+        mask_sat = cv2.inRange(roi_hsv, np.array([0, 100, 0]), np.array([179, 255, 255]))
+
+        # Combinar mascaras
+        mask_anomalia = cv2.bitwise_or(mask_dark, mask_sat)
+
+        # Calculo de porcentaje de anomalia respecto a ROI
+        total_pixels = roi.shape[0] * roi.shape[1]
+        anomalia_pixels = np.count_nonzero(mask_anomalia)
+        porcentaje = anomalia_pixels / total_pixels if total_pixels > 0 else 0.0
+
+        estado_limpieza = "LIMPIA" if porcentaje < 0.10 else "SUCIA"
+
+        # Generacion de imagen segmentada (Visualizacion para la HMI)
+        anomalia_bgr = np.zeros_like(roi)
+        # Dibujar de rojo los pixeles detectados como anomalia
+        anomalia_bgr[mask_anomalia > 0] = [0, 0, 255]
+
+        # Canvas con fondo oscurecido
         canvas = cv2.addWeighted(frame_bgr, 0.3, np.zeros_like(frame_bgr), 0, 0)
-        canvas[y1:y2, x1:x2] = segmented_roi_bgr_large
-        
-        return canvas
+        canvas[y1:y2, x1:x2] = anomalia_bgr
+
+        return canvas, estado_limpieza
 
     def _publicar_frame(self) -> None:
         if not self._captura.isOpened():
@@ -368,21 +374,7 @@ class NodoCamara(Node):
 
             if self._frames_botella >= 15:
                 annotated_frame = frame.copy()
-                segmentated_frame = self._aplicar_segmentacion(frame, mejor_box)
-                
-                gray = cv2.cvtColor(segmentated_frame, cv2.COLOR_BGR2GRAY)
-                mask = gray > 0
-                bottle_pixels = segmentated_frame[mask]
-                import numpy as np
-                if bottle_pixels.size > 0:
-                    unique, counts = np.unique(bottle_pixels.reshape(-1, 3), axis=0, return_counts=True)
-                    if len(counts) > 0:
-                        max_color_ratio = np.max(counts) / np.sum(counts)
-                        estado_limpieza = "LIMPIA" if max_color_ratio > 0.85 else "SUCIA"
-                    else:
-                        estado_limpieza = "LIMPIA"
-                else:
-                    estado_limpieza = "LIMPIA"
+                segmentated_frame, estado_limpieza = self._aplicar_segmentacion(frame, mejor_box)
                 
                 self._ultimo_veredicto = f"Botella {resultado.upper()} {estado_limpieza}"
 
