@@ -16,7 +16,7 @@ import numpy as np
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
-from std_msgs.msg import String, Float32
+from std_msgs.msg import String, Float32, Bool
 from cv_bridge import CvBridge
 
 QOS_VIDEO = QoSProfile(
@@ -121,6 +121,11 @@ class NodoCamara(Node):
         self._pub_analisis = self.create_publisher(String, "/analisis_botella", 10)
         self._pub_tamano = self.create_publisher(Float32, "/tamano_estimado", 10)
         self._pub_video_segmentado = self.create_publisher(Image, "/camara/video_segmentado", QOS_VIDEO)
+        self._pub_foto_anotada = self.create_publisher(Image, "/camara/foto_anotada", QOS_VIDEO)
+        
+        self._sub_comando = self.create_subscription(Bool, "/comando_fotografia", self._cb_comando_foto, 10)
+        self._tomar_foto = False
+        
         self._ultimo_segmentado = None
 
         # Parametros de IA (NCNN)
@@ -169,6 +174,10 @@ class NodoCamara(Node):
         threading.Thread(target=self._leer_camara_continuamente, daemon=True).start()
 
         self._timer   = self.create_timer(TIMER_PERIOD, self._publicar_frame)
+
+    def _cb_comando_foto(self, msg: Bool) -> None:
+        if msg.data:
+            self._tomar_foto = True
 
     # ── Hilo de Lectura ───────────────────────────────────────────────────
 
@@ -307,8 +316,19 @@ class NodoCamara(Node):
         self._fallos_consecutivos = 0
         self._frame_count += 1
 
-        # --- FRAME SKIPPING e INFERENCIA NCNN ---
-        if self._frame_count % 5 == 1 or self._ultima_caja is None:
+        # Siempre publicar video RAW en vivo (espejo)
+        try:
+            msg_raw = self._bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+            msg_raw.header.stamp = self.get_clock().now().to_msg()
+            msg_raw.header.frame_id = "camara_logitech_c270"
+            self._pub.publish(msg_raw)
+        except Exception as exc:
+            self.get_logger().error(f"Error publicando video_raw: {exc}")
+
+        # Inferencia y Segmentación SOLO bajo demanda (Paradigma Snapshot)
+        if self._tomar_foto:
+            self._tomar_foto = False
+            
             detections = self._inferir(frame)
             mejor_conf = 0.0
             mejor_box = None
@@ -330,12 +350,12 @@ class NodoCamara(Node):
                 area = ancho * alto
                 resultado = "grande" if area > 33000 else "chica"
 
-                # Publicar área física estimada (Lo mejor de nodo_vision)
+                # Publicar área física estimada
                 msg_tam = Float32()
                 msg_tam.data = float(area * self.k_area)
                 self._pub_tamano.publish(msg_tam)
 
-                # Aplicar segmentacion K-Means sobre el ROI
+                # Aplicar segmentacion K-Means sobre el ROI (con optimización de CPU)
                 segmentated_frame = self._aplicar_segmentacion(frame, mejor_box)
 
                 cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -345,25 +365,19 @@ class NodoCamara(Node):
             msg_str = String()
             msg_str.data = resultado
             self._pub_analisis.publish(msg_str)
-            
-            self._ultima_caja = annotated_frame
-            self._ultimo_segmentado = segmentated_frame
-        else:
-            annotated_frame = self._ultima_caja
-            segmentated_frame = self._ultimo_segmentado if self._ultimo_segmentado is not None else frame.copy()
 
-        try:
-            msg = self._bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
-            msg.header.stamp    = self.get_clock().now().to_msg()
-            msg.header.frame_id = "camara_logitech_c270"
-            self._pub.publish(msg)
+            try:
+                # Publicar Foto Anotada
+                msg_anotada = self._bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
+                msg_anotada.header = msg_raw.header
+                self._pub_foto_anotada.publish(msg_anotada)
 
-            # Publicar el frame segmentado
-            msg_seg = self._bridge.cv2_to_imgmsg(segmentated_frame, encoding="bgr8")
-            msg_seg.header = msg.header
-            self._pub_video_segmentado.publish(msg_seg)
-        except Exception as exc:
-            self.get_logger().error(f"Error publicando frame: {exc}")
+                # Publicar Foto Segmentada
+                msg_seg = self._bridge.cv2_to_imgmsg(segmentated_frame, encoding="bgr8")
+                msg_seg.header = msg_raw.header
+                self._pub_video_segmentado.publish(msg_seg)
+            except Exception as exc:
+                self.get_logger().error(f"Error publicando frames fotograficos: {exc}")
 
     def destroy_node(self) -> None:
         self._timer.cancel()

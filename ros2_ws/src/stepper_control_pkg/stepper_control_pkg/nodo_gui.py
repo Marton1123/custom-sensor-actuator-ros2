@@ -12,7 +12,7 @@ import rclpy
 import rclpy.executors
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Float32, String, Bool
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 
@@ -76,22 +76,31 @@ class NodoGUI(Node):
         self._fn_lock = threading.Lock()
         self._fn_frame_raw = None
         self._fn_frame_seg = None
+        self._fn_foto_anotada = None
         self._fn_peso = None
         self._fn_area = None
         self._fn_estado = None
 
+        self._pub_comando_foto = self.create_publisher(Bool, "/comando_fotografia", 10)
         self.create_subscription(Image, "/camara/video_raw", self._cb_camara_raw, QOS_VIDEO)
         self.create_subscription(Image, "/camara/video_segmentado", self._cb_camara_seg, QOS_VIDEO)
+        self.create_subscription(Image, "/camara/foto_anotada", self._cb_foto_anotada, QOS_VIDEO)
         self.create_subscription(Float32, "/peso_botella", self._cb_peso, 10)
         self.create_subscription(Float32, "/tamano_estimado", self._cb_area, 10)
         self.create_subscription(String, "/analisis_botella", self._cb_estado, 10)
 
         self.get_logger().info("NodoGUI (Dashboard) iniciado de forma pasiva.")
 
-    def registrar_callbacks(self, fn_raw, fn_seg, fn_peso, fn_area, fn_estado):
+    def disparar_fotografia(self):
+        msg = Bool()
+        msg.data = True
+        self._pub_comando_foto.publish(msg)
+
+    def registrar_callbacks(self, fn_raw, fn_seg, fn_foto, fn_peso, fn_area, fn_estado):
         with self._fn_lock:
             self._fn_frame_raw = fn_raw
             self._fn_frame_seg = fn_seg
+            self._fn_foto_anotada = fn_foto
             self._fn_peso = fn_peso
             self._fn_area = fn_area
             self._fn_estado = fn_estado
@@ -106,6 +115,13 @@ class NodoGUI(Node):
     def _cb_camara_seg(self, msg: Image) -> None:
         with self._fn_lock:
             fn = self._fn_frame_seg
+        if fn:
+            img = self._msg_to_qimage(msg)
+            if img: fn(img)
+
+    def _cb_foto_anotada(self, msg: Image) -> None:
+        with self._fn_lock:
+            fn = self._fn_foto_anotada
         if fn:
             img = self._msg_to_qimage(msg)
             if img: fn(img)
@@ -138,6 +154,7 @@ class NodoGUI(Node):
 class VentanaPrincipal(QMainWindow):
     senal_frame_raw = pyqtSignal(QImage)
     senal_frame_seg = pyqtSignal(QImage)
+    senal_foto_anotada = pyqtSignal(QImage)
     senal_peso = pyqtSignal(float)
     senal_area = pyqtSignal(float)
     senal_estado = pyqtSignal(str)
@@ -152,12 +169,14 @@ class VentanaPrincipal(QMainWindow):
         self._build_ui()
         self._ultimo_peso = 0.0
         self._ultimo_estado = "vacio"
-        self._conteo_histeresis = 0
-        self._conteo_bloqueo = 0
-        self._estado_visual_actual = 'ESPERA'
+        import time
+        self.time = time
+        self._estado_maquina = 1
+        self._tiempo_estabilizando = 0.0
 
         self.senal_frame_raw.connect(self._actualizar_raw)
         self.senal_frame_seg.connect(self._actualizar_seg)
+        self.senal_foto_anotada.connect(self._actualizar_foto_anotada)
         self.senal_peso.connect(self._actualizar_peso)
         self.senal_area.connect(self._actualizar_area)
         self.senal_estado.connect(self._actualizar_estado)
@@ -165,6 +184,7 @@ class VentanaPrincipal(QMainWindow):
         nodo.registrar_callbacks(
             self.senal_frame_raw.emit,
             self.senal_frame_seg.emit,
+            self.senal_foto_anotada.emit,
             self.senal_peso.emit,
             self.senal_area.emit,
             self.senal_estado.emit
@@ -234,6 +254,13 @@ class VentanaPrincipal(QMainWindow):
         return container
 
     def _actualizar_raw(self, img: QImage) -> None:
+        if self._estado_maquina in [1, 2]:
+            if self.lbl_camara_raw.size().width() > 0 and self.lbl_camara_raw.size().height() > 0:
+                self.lbl_camara_raw.setPixmap(QPixmap.fromImage(img).scaled(
+                    self.lbl_camara_raw.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+                ))
+
+    def _actualizar_foto_anotada(self, img: QImage) -> None:
         if self.lbl_camara_raw.size().width() > 0 and self.lbl_camara_raw.size().height() > 0:
             self.lbl_camara_raw.setPixmap(QPixmap.fromImage(img).scaled(
                 self.lbl_camara_raw.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
@@ -248,7 +275,7 @@ class VentanaPrincipal(QMainWindow):
     def _actualizar_peso(self, peso: float) -> None:
         self._ultimo_peso = peso
         self.lbl_peso.valor_label.setText(f"{peso:.1f}")
-        self._evaluar_banner()
+        self._maquina_estados()
 
     def _actualizar_area(self, area: float) -> None:
         self.lbl_area.valor_label.setText(f"{area:.1f}")
@@ -256,55 +283,53 @@ class VentanaPrincipal(QMainWindow):
     def _actualizar_estado(self, estado: str) -> None:
         self._ultimo_estado = estado
         self.lbl_estado.valor_label.setText(estado.upper())
-        self._evaluar_banner()
+        if self._estado_maquina == 3:
+            self._procesar_resultado(peso=self._ultimo_peso, estado=self._ultimo_estado.lower())
 
-    def _evaluar_banner(self) -> None:
-        # Si estamos en un estado final, reducimos el contador de bloqueo y no hacemos nada hasta que termine
-        if self._conteo_bloqueo > 0:
-            self._conteo_bloqueo -= 1
-            return
-
+    def _maquina_estados(self) -> None:
         peso = self._ultimo_peso
-        estado = self._ultimo_estado.lower()
 
-        # Determinamos el estado físico instantáneo
-        if peso < 10.0:
-            estado_inst = 'ESPERA'
-        else:
-            if estado in ["grande", "chica"]:
-                if (estado == "chica" and peso < 40.0) or (estado == "grande" and peso < 80.0):
-                    estado_inst = 'LIMPIA'
-                else:
-                    estado_inst = 'SUCIA'
+        if self._estado_maquina == 1:
+            if peso >= 10.0:
+                self._estado_maquina = 2
+                self._tiempo_estabilizando = self.time.time()
+                self.lbl_banner.setText("ESTABILIZANDO... POR FAVOR RETIRE LA MANO.")
+                self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
+
+        elif self._estado_maquina == 2:
+            if peso < 10.0:
+                self._estado_maquina = 1
+                self.lbl_banner.setText("ESPERANDO BOTELLA... INGRESE SU ENVASE.")
+                self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
+            elif self.time.time() - self._tiempo_estabilizando >= 2.0:
+                self._estado_maquina = 3
+                self.lbl_banner.setText("FOTOGRAFÍA Y ANÁLISIS EN CURSO...")
+                self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
+                self._nodo.disparar_fotografia()
+
+        elif self._estado_maquina == 5:
+            if peso < 10.0:
+                self._estado_maquina = 1
+                self.lbl_banner.setText("ESPERANDO BOTELLA... INGRESE SU ENVASE.")
+                self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
+                self.lbl_camara_seg.clear()
+                self.lbl_camara_seg.setText("[ VIDEO SEGMENTADO ]")
+                self.lbl_estado.valor_label.setText("VACIO")
+                self.lbl_area.valor_label.setText("0.0")
+
+    def _procesar_resultado(self, peso: float, estado: str) -> None:
+        if estado in ["grande", "chica"]:
+            if (estado == "chica" and peso < 40.0) or (estado == "grande" and peso < 80.0):
+                self.lbl_banner.setText("¡BOTELLA PERFECTA! PROCESO REALIZADO. RETIRE BOTELLA.")
+                self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #008000; padding: 10px;")
             else:
-                estado_inst = 'ANALIZANDO'
-
-        # Lógica de histéresis (Debouncing)
-        if estado_inst == self._estado_visual_actual:
-            self._conteo_histeresis = 0
+                self.lbl_banner.setText("BOTELLA SUCIA/CON LÍQUIDO. FAVOR RETIRARLA DE LA MÁQUINA.")
+                self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #800000; padding: 10px;")
         else:
-            self._conteo_histeresis += 1
-
-            # Umbral de confirmación para cambiar de estado visual (15 cuadros)
-            if self._conteo_histeresis >= 15:
-                self._estado_visual_actual = estado_inst
-                self._conteo_histeresis = 0
-
-                # Aplicar el nuevo estado a la UI
-                if estado_inst == 'ESPERA':
-                    self.lbl_banner.setText("Esperando botella... Ingrese su envase.")
-                    self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
-                elif estado_inst == 'ANALIZANDO':
-                    self.lbl_banner.setText("Analizando botella... Por favor espere.")
-                    self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
-                elif estado_inst == 'LIMPIA':
-                    self.lbl_banner.setText("¡La botella está perfecta! Proceso realizado.")
-                    self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #008000; padding: 10px;")
-                    self._conteo_bloqueo = 90  # Congelar ~3 segundos
-                elif estado_inst == 'SUCIA':
-                    self.lbl_banner.setText("La botella presenta suciedad. Favor retirarla de la máquina.")
-                    self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #800000; padding: 10px;")
-                    self._conteo_bloqueo = 90  # Congelar ~3 segundos
+            self.lbl_banner.setText("NO SE DETECTÓ BOTELLA VÁLIDA. FAVOR RETIRAR EL OBJETO.")
+            self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #800000; padding: 10px;")
+            
+        self._estado_maquina = 5
 
     def keyPressEvent(self, event) -> None:
         super().keyPressEvent(event)
