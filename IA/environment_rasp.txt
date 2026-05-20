@@ -1,0 +1,6 @@
+# requirements_rpi.txt
+# Entorno de inferencia RPi 5 — CPU only, sin PyTorch, sin Ultralytics
+# Usar con: pip install -r requirements_rpi.txt
+
+ncnn>=1.0.20230223
+numpy>=1.26,<2.0

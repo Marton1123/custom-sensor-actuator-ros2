@@ -41,15 +41,17 @@ class NodoCamara(Node):
         self._pub_analisis = self.create_publisher(String, "/analisis_botella", 10)
 
         # Parametros de IA (YOLO)
+        self.declare_parameter("modelo_ncnn", "/home/pi/modelos/best_ncnn_model")
         self.declare_parameter("k_area", 0.05)
         self.declare_parameter("conf_threshold", 0.70)
         
+        self.modelo_path = str(self.get_parameter("modelo_ncnn").value)
         self.k_area = float(self.get_parameter("k_area").value)
         self.conf_threshold = float(self.get_parameter("conf_threshold").value)
 
-        self.get_logger().info("Descargando/Cargando modelo YOLOv8 Nano pre-entrenado...")
+        self.get_logger().info(f"Cargando modelo NCNN: {self.modelo_path}")
         try:
-            self.model = YOLO("yolov8n.pt")
+            self.model = YOLO(self.modelo_path, task="detect")
         except Exception as e:
             self.get_logger().error(f"Error cargando YOLO: {e}")
             self.model = None
@@ -145,8 +147,8 @@ class NodoCamara(Node):
         if self._frame_count % 5 == 1 or self._ultima_caja is None:
             # --- INFERENCIA YOLO ---
             if self.model is not None:
-                # Filtrar exclusivamente clase 39 ('bottle' en COCO)
-                results = self.model(frame, classes=[39], verbose=False)
+                # Modelo entrenado para detectar solo botellas (no requiere filtrar por clase COCO)
+                results = self.model(frame, verbose=False)
             else:
                 results = []
 
