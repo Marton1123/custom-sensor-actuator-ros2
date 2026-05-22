@@ -1,18 +1,17 @@
 """
-main_launch.py
-==============
-Launch file de produccion (Modo Produccion) para stepper_control_pkg.
+main_launch.py — Orquestador de producción para stepper_control_pkg.
 
-Lanza cuatro nodos en el mismo proceso de ROS 2:
-    1. nodo_actuadores  — control GPIO del motor NEMA 17 (lgpio)
-    2. nodo_camara      — captura video Logitech C270, publica /camara/video_raw
-    3. nodo_gui         — interfaz tacil PyQt6, suscrito a /camara/video_raw
-    4. nodo_balanza     — lee peso de la celda de carga HX711, publica /peso_botella
+Lanza los cuatro nodos del sistema de clasificación autónoma en el mismo
+proceso de ROS 2 (Jazzy Jalisco):
+    1. nodo_actuadores — control GPIO del motor paso a paso (lgpio).
+    2. nodo_camara     — visión autónoma UVC + inferencia NCNN.
+    3. nodo_gui        — dashboard HMI PyQt6, suscrito a /camara/video_raw.
+    4. nodo_balanza    — lectura de celda de carga HX711, publica /peso_elemento.
 
 Uso:
     ros2 launch stepper_control_pkg main_launch.py
 
-Parametros sobreescribibles:
+Parámetros sobreescribibles en tiempo de lanzamiento:
     ros2 launch stepper_control_pkg main_launch.py delay_pulso:=0.001
 """
 
@@ -23,6 +22,14 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description() -> LaunchDescription:
+    """Construye el grafo de nodos de ROS 2 para el sistema de clasificación autónoma.
+
+    Carga el archivo de parámetros YAML compartido y registra los cuatro
+    nodos del sistema con sus configuraciones de hardware por defecto.
+
+    Returns:
+        LaunchDescription: Descripción completa del grafo de lanzamiento.
+    """
     pkg_share = get_package_share_directory('stepper_control_pkg')
     config_path = os.path.join(pkg_share, 'config', 'parametros.yaml')
 

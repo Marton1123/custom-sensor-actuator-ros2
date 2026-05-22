@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-nodo_balanza.py — Lector de celda de carga HX711 con Hardware Real.
+nodo_balanza.py — Nodo ROS 2 de adquisición de datos de celda de carga (HX711).
 
-Implementa la lectura del sensor HX711 utilizando gpiozero para máxima 
-compatibilidad con el chip RP1 de Raspberry Pi 5.
-Aplica tara automática al inicio y publica el peso ajustado.
+Implementa la interfaz de hardware para el convertidor ADC de 24 bits HX711,
+utilizando gpiozero para compatibilidad con el chip RP1 de Raspberry Pi 5.
+Realiza tara automática durante la inicialización y publica la masa del
+elemento presente en el tópico /peso_elemento a 10 Hz.
 """
 
 import time
@@ -110,20 +111,29 @@ class HX711_GPIOZero:
 
 
 class NodoBalanza(Node):
-    """
-    Nodo ROS 2 para la publicación del peso real de la balanza.
-    Incluye rutina de tara automática en la inicialización y factor
-    de calibración interno.
+    """Nodo ROS 2 para adquisición y publicación de masa vía sensor HX711.
+
+    Inicializa el sensor HX711 mediante bit-banging sobre GPIO (gpiozero),
+    realiza una tara automática al arrancar y publica el peso neto calculado
+    aplicando la fórmula: peso_g = (raw - offset) / reference_unit.
+
+    Publica:
+        /peso_elemento (std_msgs/Float32): Peso en gramos del elemento detectado.
+
+    Parámetros YAML (nodo_balanza):
+        hx711_reference_unit (float): Factor de calibración ADC→gramos. Default: 2273.9.
     """
 
     def __init__(self):
-        """
-        Inicializa el nodo ROS 2, los pines, realiza la tara automática
-        y configura el temporizador de publicación.
+        """Configura GPIO, realiza tara automática y registra el temporizador de publicación.
+
+        Raises:
+            Exception: Si el hardware HX711 no responde. El nodo permanece
+                activo pero no publicará datos hasta que el hardware esté disponible.
         """
         super().__init__('nodo_balanza')
 
-        self._pub_peso = self.create_publisher(Float32, '/peso_botella', 10)
+        self._pub_peso = self.create_publisher(Float32, '/peso_elemento', 10)
         
         # Factor de calibración de clase por parámetro
         self.declare_parameter("hx711_reference_unit", 2273.9)

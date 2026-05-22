@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-nodo_camara.py — Nodo ROS 2 de captura de video y visión NCNN
-Publica sensor_msgs/Image en /camara/video_raw a ~30 FPS usando CvBridge.
+nodo_camara.py — Nodo ROS 2 de Visión Autónoma e Inferencia de Objetos.
+
+Captura fotogramas desde una cámara UVC (V4L2) en un hilo daemon y ejecuta
+inferencia YOLOv8 mediante el motor NCNN nativo para detectar y clasificar
+elementos en escena. Aplica análisis HSV sobre la ROI para determinar el
+estado del objetivo (OPTIMO / ANOMALIA) y publica los resultados en el bus
+ROS 2 a ~30 FPS usando CvBridge.
 
 Resiliencia:
     Si la camara falla despues de abrirse, intenta reconectarse automaticamente.
@@ -114,11 +119,33 @@ def parse_yolov8_output(raw: np.ndarray, conf_thr: float, iou_thr: float, scale:
 
 
 class NodoCamara(Node):
+    """Nodo ROS 2 de visión autónoma para detección y clasificación de objetivos.
+
+    Integra captura de video UVC, inferencia NCNN (YOLOv8) y análisis de
+    anomalías HSV en un ciclo de máquina de estados asíncrona.
+
+    Publica:
+        /camara/video_raw (sensor_msgs/Image): Fotograma anotado en tiempo real.
+        /camara/video_segmentado (sensor_msgs/Image): Mapa de anomalías HSV.
+        /clasificacion_objeto (std_msgs/String): Veredicto de clasificación.
+        /tamano_estimado (std_msgs/Float32): Área transversal estimada en cm².
+
+    Parámetros YAML (nodo_camara):
+        distancia_camara_cm (float): Distancia de referencia en cm. Default: 60.0.
+        modelo_ncnn (str): Ruta al directorio del modelo NCNN.
+        k_area (float): Factor escala píxel→cm². Default: 0.05.
+        conf_threshold (float): Umbral de confianza YOLO. Default: 0.70.
+        iou_threshold (float): Umbral IoU para NMS. Default: 0.45.
+        ncnn_threads (int): Hilos de inferencia NCNN. Default: 2.
+        ncnn_input_size (int): Resolución cuadrada de entrada. Default: 640.
+    """
+
     def __init__(self) -> None:
+        """Inicializa publishers, parámetros YAML, modelo NCNN y hilo de captura."""
         super().__init__("nodo_camara")
         self._bridge  = CvBridge()
         self._pub     = self.create_publisher(Image, "/camara/video_raw", QOS_VIDEO)
-        self._pub_analisis = self.create_publisher(String, "/analisis_botella", 10)
+        self._pub_analisis = self.create_publisher(String, "/clasificacion_objeto", 10)
         self._pub_tamano = self.create_publisher(Float32, "/tamano_estimado", 10)
         self._pub_video_segmentado = self.create_publisher(Image, "/camara/video_segmentado", QOS_VIDEO)
         self._pub_foto_anotada = self.create_publisher(Image, "/camara/foto_anotada", QOS_VIDEO)
@@ -237,6 +264,19 @@ class NodoCamara(Node):
         return []
 
     def _aplicar_segmentacion(self, frame_bgr: np.ndarray, bbox: dict) -> tuple:
+        """Aplica filtros HSV sobre la ROI del objetivo para clasificar su estado.
+
+        Combina una máscara de valor bajo (opacidad/oscuridad) con una máscara
+        de saturación alta (líquidos/etiquetas) para cuantificar el porcentaje
+        de anomalía. Genera una imagen de visualización con las anomalías en rojo.
+
+        Args:
+            frame_bgr: Fotograma fuente en espacio de color BGR.
+            bbox: Diccionario con claves x1, y1, x2, y2 de la caja delimitadora.
+
+        Returns:
+            tuple: (canvas_visualizacion, estado) donde estado es 'OPTIMO' o 'ANOMALIA'.
+        """
         frame_copia = frame_bgr.copy()
         x1, y1 = int(bbox["x1"]), int(bbox["y1"])
         x2, y2 = int(bbox["x2"]), int(bbox["y2"])
@@ -247,7 +287,7 @@ class NodoCamara(Node):
         y2 = min(frame_copia.shape[0], y2)
 
         if (x2 <= x1) or (y2 <= y1):
-            return frame_copia, "LIMPIA"
+            return frame_copia, "OPTIMO"
 
         roi = frame_copia[y1:y2, x1:x2]
 
@@ -267,7 +307,7 @@ class NodoCamara(Node):
         anomalia_pixels = np.count_nonzero(mask_anomalia)
         porcentaje = anomalia_pixels / total_pixels if total_pixels > 0 else 0.0
 
-        estado_limpieza = "LIMPIA" if porcentaje < 0.10 else "SUCIA"
+        estado_limpieza = "OPTIMO" if porcentaje < 0.10 else "ANOMALIA"
 
         # Generacion de imagen segmentada (Visualizacion para la HMI)
         anomalia_bgr = np.zeros_like(roi)
@@ -281,6 +321,15 @@ class NodoCamara(Node):
         return canvas, estado_limpieza
 
     def _publicar_frame(self) -> None:
+        """Callback de temporizador (~30 FPS). Orquesta la máquina de estados de visión.
+
+        En estado BUSQUEDA ejecuta inferencia en cada fotograma. Al confirmar la
+        presencia de un objetivo durante 15 fotogramas consecutivos, aplica
+        segmentación HSV y emite el veredicto final, transitando a ESPERA_RETIRO.
+
+        En estado ESPERA_RETIRO mantiene el veredicto activo hasta que el objetivo
+        desaparece del campo visual durante 30 fotogramas, retornando a BUSQUEDA.
+        """
         if not self._captura.isOpened():
             self._fallos_consecutivos += 1
             if self._fallos_consecutivos >= MAX_FALLOS_CONSECUTIVOS:
@@ -362,7 +411,7 @@ class NodoCamara(Node):
                 img_raw = frame.copy()
                 img_seg, estado_limpieza = self._aplicar_segmentacion(frame.copy(), mejor_box)
                 
-                self._ultimo_veredicto = f"Botella {resultado.upper()} {estado_limpieza}"
+                self._ultimo_veredicto = f"Target {resultado.upper()} {estado_limpieza}"
 
                 cv2.rectangle(img_raw, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.putText(img_raw, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
@@ -400,10 +449,10 @@ class NodoCamara(Node):
             if mejor_box is not None and mejor_conf >= 0.40:
                 self._frames_vacio = 0
                 msg_str = String()
-                if "LIMPIA" in self._ultimo_veredicto:
-                    msg_str.data = f"{self._ultimo_veredicto}\nProcesando reciclaje... (Esperando que desaparezca)"
+                if "OPTIMO" in self._ultimo_veredicto:
+                    msg_str.data = f"{self._ultimo_veredicto}\nProcesando... Esperando retiro del elemento."
                 else:
-                    msg_str.data = f"{self._ultimo_veredicto}\nPor favor, retire el envase de la máquina."
+                    msg_str.data = f"{self._ultimo_veredicto}\nPor favor, retire el elemento del sistema."
                 self._pub_analisis.publish(msg_str)
             else:
                 self._frames_vacio += 1

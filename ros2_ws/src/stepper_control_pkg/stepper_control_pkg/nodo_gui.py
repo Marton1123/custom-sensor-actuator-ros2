@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-nodo_gui.py  —  Dashboard Informativo Pasivo (PyQt6)
-====================================================
-Modo Producción — pantalla vertical 480x800, sin bordes (FramelessWindowHint).
-Estética dashboard, split screen para video raw y video segmentado.
+nodo_gui.py — Interfaz HMI pasiva de monitoreo en tiempo real (PyQt6).
+
+Implementa un dashboard de visualización para sistemas de clasificación
+autónoma. Opera en pantalla vertical 480×800 sin bordes (FramelessWindowHint),
+mostando en tiempo real los flujos de video RAW y segmentado, el peso del
+sensor de carga y el estado de clasificación del sistema.
 """
 
 import sys
@@ -70,7 +72,22 @@ QOS_VIDEO = QoSProfile(
 
 
 class NodoGUI(Node):
+    """Nodo ROS 2 pasivo de interfaz HMI para sistemas de visión autónoma.
+
+    Actua exclusivamente como puente ROS↔Qt: se suscribe a los tópicos de
+    datos del sistema y reenvía la información a la capa de presentación
+    mediante señales thread-safe. No contiene lógica de negocio.
+
+    Suscripciones:
+        /camara/video_raw (sensor_msgs/Image): Flujo de video anotado.
+        /camara/video_segmentado (sensor_msgs/Image): Mapa de anomalías HSV.
+        /peso_elemento (std_msgs/Float32): Peso en gramos del sensor de carga.
+        /tamano_estimado (std_msgs/Float32): Área estimada del objetivo en cm².
+        /clasificacion_objeto (std_msgs/String): Veredicto de clasificación.
+    """
+
     def __init__(self) -> None:
+        """Inicializa suscripciones ROS 2 y el mecanismo de callbacks thread-safe."""
         super().__init__("nodo_gui")
         self._bridge = CvBridge()
 
@@ -84,9 +101,9 @@ class NodoGUI(Node):
 
         self.create_subscription(Image, "/camara/video_raw", self._cb_camara_raw, QOS_VIDEO)
         self.create_subscription(Image, "/camara/video_segmentado", self._cb_camara_seg, QOS_VIDEO)
-        self.create_subscription(Float32, "/peso_botella", self._cb_peso, 10)
+        self.create_subscription(Float32, "/peso_elemento", self._cb_peso, 10)
         self.create_subscription(Float32, "/tamano_estimado", self._cb_area, 10)
-        self.create_subscription(String, "/analisis_botella", self._cb_estado, 10)
+        self.create_subscription(String, "/clasificacion_objeto", self._cb_estado, 10)
 
         self.get_logger().info("NodoGUI (Dashboard) iniciado de forma pasiva.")
 
@@ -138,6 +155,21 @@ class NodoGUI(Node):
 
 
 class VentanaPrincipal(QMainWindow):
+    """Ventana principal del dashboard HMI (PyQt6).
+
+    Implementa la capa de presentación del sistema de clasificación.
+    Recibe datos desde NodoGUI vía señales Qt (thread-safe) y actualiza
+    los widgets en el hilo principal de Qt. Gestiona el ciclo de estados
+    visuales: ESPERA → ANALIZANDO → ESTADO_OPTIMO / ANOMALIA_DETECTADA.
+
+    Attributes:
+        senal_frame_raw: Señal para actualizar el visor de video RAW.
+        senal_frame_seg: Señal para actualizar el visor de segmentación.
+        senal_peso: Señal para actualizar el indicador de peso.
+        senal_area: Señal para actualizar el indicador de área.
+        senal_estado: Señal para actualizar el banner de estado.
+    """
+
     senal_frame_raw = pyqtSignal(QImage)
     senal_frame_seg = pyqtSignal(QImage)
     senal_peso = pyqtSignal(float)
@@ -177,7 +209,7 @@ class VentanaPrincipal(QMainWindow):
         layout = QVBoxLayout(root)
         
         # Banner UX Superior
-        self.lbl_banner = QLabel("Esperando botella... Ingrese su envase.")
+        self.lbl_banner = QLabel("Esperando elemento... Coloque el objeto en el sistema.")
         self.lbl_banner.setObjectName("lbl_banner")
         self.lbl_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
@@ -253,7 +285,7 @@ class VentanaPrincipal(QMainWindow):
         self.lbl_estado.valor_label.setText(estado.upper().split()[0] if " " in estado else estado.upper())
         
         if self._ultimo_estado == "vacio":
-            self.lbl_banner.setText("ESPERANDO BOTELLA... INGRESE SU ENVASE.")
+            self.lbl_banner.setText("ESPERANDO ELEMENTO... COLOQUE EL OBJETO EN EL SISTEMA.")
             self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
             self.lbl_camara_seg.clear()
             self.lbl_camara_seg.setText("[ VIDEO SEGMENTADO ]")
@@ -261,9 +293,9 @@ class VentanaPrincipal(QMainWindow):
             self.lbl_banner.setText("ESTABILIZANDO... POR FAVOR RETIRE LA MANO.")
             self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
         else:
-            if "LIMPIA" in self._ultimo_estado:
+            if "OPTIMO" in self._ultimo_estado:
                 self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #008000; padding: 10px;")
-            elif "SUCIA" in self._ultimo_estado:
+            elif "ANOMALIA" in self._ultimo_estado:
                 self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #800000; padding: 10px;")
             else:
                 self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
