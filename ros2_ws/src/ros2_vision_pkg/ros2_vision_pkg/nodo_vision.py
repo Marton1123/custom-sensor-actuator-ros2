@@ -182,62 +182,122 @@ class NodoVision(Node):
         return canvas, estado_limpieza
 
     def decode_yolov8(self, raw_output, img_w, img_h, scale_w, scale_h, pad_w, pad_h):
-        if raw_output.shape[0] != 66 or raw_output.shape[1] != 8400:
+        num_classes = len(self.classes)
+        expected_end2end = 4 + num_classes  # 6 para 2 clases
+
+        if raw_output.shape[0] == expected_end2end and raw_output.shape[1] == 8400:
+            # ── Modelo end2end: boxes ya decodificadas + scores con sigmoid ──
+            cx = raw_output[0, :]
+            cy = raw_output[1, :]
+            w  = raw_output[2, :]
+            h  = raw_output[3, :]
+            cls_scores = raw_output[4:, :]  # [num_classes, 8400], ya sigmoid
+
+            max_scores = np.max(cls_scores, axis=0)
+            class_ids  = np.argmax(cls_scores, axis=0)
+
+            valid_mask = max_scores > self.conf_threshold
+            if not np.any(valid_mask):
+                return [], [], []
+
+            v_cx = cx[valid_mask]
+            v_cy = cy[valid_mask]
+            v_w  = w[valid_mask]
+            v_h  = h[valid_mask]
+            valid_scores    = max_scores[valid_mask]
+            valid_class_ids = class_ids[valid_mask]
+
+            # cx,cy,w,h → x1,y1,x2,y2
+            x1 = v_cx - v_w / 2.0
+            y1 = v_cy - v_h / 2.0
+            x2 = v_cx + v_w / 2.0
+            y2 = v_cy + v_h / 2.0
+
+            # Quitar padding y reescalar a imagen original
+            x1 = (x1 - pad_w) / scale_w
+            y1 = (y1 - pad_h) / scale_h
+            x2 = (x2 - pad_w) / scale_w
+            y2 = (y2 - pad_h) / scale_h
+
+            x1 = np.clip(x1, 0, img_w)
+            y1 = np.clip(y1, 0, img_h)
+            x2 = np.clip(x2, 0, img_w)
+            y2 = np.clip(y2, 0, img_h)
+
+            boxes = np.stack([x1, y1, x2, y2], axis=1)
+
+            final_boxes, final_scores, final_class_ids = [], [], []
+            for cls_id in np.unique(valid_class_ids):
+                cls_mask = valid_class_ids == cls_id
+                cls_boxes = boxes[cls_mask]
+                cls_scores_arr = valid_scores[cls_mask]
+                keep = nms(cls_boxes, cls_scores_arr, self.iou_threshold)
+                for k in keep:
+                    final_boxes.append(cls_boxes[k])
+                    final_scores.append(cls_scores_arr[k])
+                    final_class_ids.append(cls_id)
+
+            return final_boxes, final_scores, final_class_ids
+
+        elif raw_output.shape[0] == (64 + num_classes) and raw_output.shape[1] == 8400:
+            # ── Modelo RAW: DFL sin procesar + logits sin sigmoid ──
+            coords_raw = raw_output[:64, :]
+            cls_raw = raw_output[64:, :]
+
+            cls_scores = 1.0 / (1.0 + np.exp(-cls_raw))
+            max_scores = np.max(cls_scores, axis=0)
+            class_ids = np.argmax(cls_scores, axis=0)
+
+            valid_mask = max_scores > self.conf_threshold
+            if not np.any(valid_mask):
+                return [], [], []
+
+            valid_scores = max_scores[valid_mask]
+            valid_class_ids = class_ids[valid_mask]
+
+            valid_coords = coords_raw[:, valid_mask].reshape(4, 16, -1)
+            valid_anchors = self.anchors[valid_mask].T
+            valid_strides = self.strides[valid_mask].T
+
+            x = softmax(valid_coords, axis=1)
+            dfl_coords = np.sum(x * self.dfl_weights, axis=1)
+
+            x1 = (valid_anchors[0] - dfl_coords[0]) * valid_strides[0]
+            y1 = (valid_anchors[1] - dfl_coords[1]) * valid_strides[0]
+            x2 = (valid_anchors[0] + dfl_coords[2]) * valid_strides[0]
+            y2 = (valid_anchors[1] + dfl_coords[3]) * valid_strides[0]
+
+            x1 = (x1 - pad_w) / scale_w
+            y1 = (y1 - pad_h) / scale_h
+            x2 = (x2 - pad_w) / scale_w
+            y2 = (y2 - pad_h) / scale_h
+
+            x1 = np.clip(x1, 0, img_w)
+            y1 = np.clip(y1, 0, img_h)
+            x2 = np.clip(x2, 0, img_w)
+            y2 = np.clip(y2, 0, img_h)
+
+            boxes = np.stack([x1, y1, x2, y2], axis=1)
+
+            final_boxes, final_scores, final_class_ids = [], [], []
+            for cls_id in np.unique(valid_class_ids):
+                cls_mask = valid_class_ids == cls_id
+                cls_boxes = boxes[cls_mask]
+                cls_scores_arr = valid_scores[cls_mask]
+                keep = nms(cls_boxes, cls_scores_arr, self.iou_threshold)
+                for k in keep:
+                    final_boxes.append(cls_boxes[k])
+                    final_scores.append(cls_scores_arr[k])
+                    final_class_ids.append(cls_id)
+
+            return final_boxes, final_scores, final_class_ids
+
+        else:
+            self.get_logger().warn(
+                f"Formato de salida inesperado: {raw_output.shape}. "
+                f"Esperado ({expected_end2end}, 8400) o ({64 + num_classes}, 8400)."
+            )
             return [], [], []
-
-        coords_raw = raw_output[:64, :]
-        cls_raw = raw_output[64:, :]
-
-        cls_scores = 1.0 / (1.0 + np.exp(-cls_raw))
-        max_scores = np.max(cls_scores, axis=0)
-        class_ids = np.argmax(cls_scores, axis=0)
-
-        valid_mask = max_scores > self.conf_threshold
-
-        if not np.any(valid_mask):
-            return [], [], []
-
-        valid_scores = max_scores[valid_mask]
-        valid_class_ids = class_ids[valid_mask]
-        
-        valid_coords = coords_raw[:, valid_mask].reshape(4, 16, -1)
-        valid_anchors = self.anchors[valid_mask].T
-        valid_strides = self.strides[valid_mask].T
-
-        x = softmax(valid_coords, axis=1)
-        dfl_coords = np.sum(x * self.dfl_weights, axis=1)
-
-        x1 = (valid_anchors[0] - dfl_coords[0]) * valid_strides[0]
-        y1 = (valid_anchors[1] - dfl_coords[1]) * valid_strides[0]
-        x2 = (valid_anchors[0] + dfl_coords[2]) * valid_strides[0]
-        y2 = (valid_anchors[1] + dfl_coords[3]) * valid_strides[0]
-
-        x1 = (x1 - pad_w) / scale_w
-        y1 = (y1 - pad_h) / scale_h
-        x2 = (x2 - pad_w) / scale_w
-        y2 = (y2 - pad_h) / scale_h
-
-        x1 = np.clip(x1, 0, img_w)
-        y1 = np.clip(y1, 0, img_h)
-        x2 = np.clip(x2, 0, img_w)
-        y2 = np.clip(y2, 0, img_h)
-
-        boxes = np.stack([x1, y1, x2, y2], axis=1)
-
-        final_boxes, final_scores, final_class_ids = [], [], []
-        for cls_id in np.unique(valid_class_ids):
-            cls_mask = valid_class_ids == cls_id
-            cls_boxes = boxes[cls_mask]
-            cls_scores_arr = valid_scores[cls_mask]
-
-            keep = nms(cls_boxes, cls_scores_arr, self.iou_threshold)
-            
-            for k in keep:
-                final_boxes.append(cls_boxes[k])
-                final_scores.append(cls_scores_arr[k])
-                final_class_ids.append(cls_id)
-
-        return final_boxes, final_scores, final_class_ids
 
     def image_callback(self, msg):
         # Proteccion anti-loop si compartimos el topico
