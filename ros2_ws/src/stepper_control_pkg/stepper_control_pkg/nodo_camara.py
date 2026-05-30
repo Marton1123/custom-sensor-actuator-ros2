@@ -70,7 +70,7 @@ class NodoCamara(Node):
                     if ret:
                         # Si tu cámara requiere rotación por su montura física, hazlo aquí.
                         # Por defecto dejaremos sin rotación. Si necesitas rotar 90 grados:
-                        # frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+                        frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
                         self._ultimo_frame = frame.copy()
                     else:
                         self._ultimo_frame = None

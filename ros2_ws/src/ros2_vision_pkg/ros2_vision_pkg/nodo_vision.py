@@ -13,6 +13,7 @@ import math
 
 import rclpy
 from rclpy.node import Node
+from ament_index_python.packages import get_package_share_directory
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import String, Float32, Bool
@@ -72,7 +73,8 @@ class NodoVision(Node):
         super().__init__('nodo_vision')
 
         # Declarar parámetros
-        self.declare_parameter('modelo_dir', os.path.expanduser('~/custom-sensor-actuator-ros2/IA/models/botellas_ncnn_model'))
+        ruta_modelo = os.path.join(get_package_share_directory('ros2_vision_pkg'), 'models', 'botellas_vs_latas_ncnn')
+        self.declare_parameter('modelo_dir', ruta_modelo)
         self.declare_parameter('conf_threshold', 0.45) # Bajado a 0.45 para latas
         self.declare_parameter('iou_threshold', 0.45)
         self.declare_parameter('input_size', 640)
@@ -260,7 +262,12 @@ class NodoVision(Node):
         pad_w = (self.input_size - new_w) // 2
         pad_h = (self.input_size - new_h) // 2
 
-        if self._estado_actual in ['BUSQUEDA', 'ESPERA_RETIRO']:
+        best_obj = ""
+        best_score = 0.0
+        best_box = None
+
+        def run_inference():
+            nonlocal best_obj, best_score, best_box
             resized_img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
             canvas = np.full((self.input_size, self.input_size, 3), 114, dtype=np.uint8)
             canvas[pad_h:pad_h+new_h, pad_w:pad_w+new_w] = resized_img
@@ -271,10 +278,6 @@ class NodoVision(Node):
             ex = self.net.create_extractor()
             ex.input("in0", mat_in)
             ret, mat_out = ex.extract("out0")
-
-            best_obj = ""
-            best_score = 0.0
-            best_box = None
 
             if ret == 0:
                 raw_output = np.array(mat_out)
@@ -288,6 +291,7 @@ class NodoVision(Node):
 
         # ---------------- FSM ----------------
         if self._estado_actual == 'BUSQUEDA':
+            run_inference()
             if best_obj in ["bottle", "can"]:
                 self._frames_botella += 1
                 bx1, by1, bx2, by2 = map(int, best_box)
@@ -334,6 +338,7 @@ class NodoVision(Node):
                 self._frames_vacio = 0
 
         elif self._estado_actual == 'ESPERA_RETIRO':
+            run_inference()
             if best_obj in ["bottle", "can"] and best_score > 0.40:
                 self._frames_vacio = 0
             else:
