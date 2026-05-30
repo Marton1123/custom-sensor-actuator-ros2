@@ -14,6 +14,7 @@ Resiliencia:
 
 import os
 import cv2
+import time
 import ncnn
 import rclpy
 import threading
@@ -416,31 +417,55 @@ class NodoCamara(Node):
                 return
 
             if self._frames_botella >= 15:
-                img_raw = frame.copy()
-                img_seg, estado_limpieza = self._aplicar_segmentacion(frame.copy(), mejor_box)
-                
+                x1, y1 = int(mejor_box["x1"]), int(mejor_box["y1"])
+                x2, y2 = int(mejor_box["x2"]), int(mejor_box["y2"])
+                ancho = x2 - x1
+                alto  = y2 - y1
+                area  = ancho * alto
+                resultado = "grande" if area > 33000 else "chica"
                 tamano_label = "GRANDE" if resultado == "grande" else "CHICO"
-                self._ultimo_veredicto = f"Elemento {tamano_label}: {estado_limpieza}"
 
-                cv2.rectangle(img_raw, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(img_raw, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-                cv2.rectangle(img_seg, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(img_seg, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
+                # ── Paso A: Fijar imagen superior con solo el BBox ──────────
+                frame_arriba = frame.copy()
+                cv2.rectangle(frame_arriba, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 try:
-                    msg_raw_pub = self._bridge.cv2_to_imgmsg(img_raw, encoding="bgr8")
+                    msg_raw_pub = self._bridge.cv2_to_imgmsg(frame_arriba, encoding="bgr8")
                     msg_raw_pub.header.stamp = msg_raw_header
                     msg_raw_pub.header.frame_id = "camara_logitech_c270"
                     self._pub.publish(msg_raw_pub)
+                except Exception: pass
 
+                # ── Paso B: Imagen inferior con banner de carga ────────────
+                img_cargando = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(
+                    img_cargando, "ANALIZANDO ELEMENTO...",
+                    (80, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 220, 255), 2
+                )
+                try:
+                    msg_cargando = self._bridge.cv2_to_imgmsg(img_cargando, encoding="bgr8")
+                    msg_cargando.header.stamp = msg_raw_header
+                    msg_cargando.header.frame_id = "camara_logitech_c270"
+                    self._pub_video_segmentado.publish(msg_cargando)
+                except Exception: pass
+
+                # ── Paso C: Retraso artificial para que el usuario lea el mensaje
+                time.sleep(0.5)
+
+                # ── Paso D: Procesar HSV y publicar resultado en imagen inferior
+                frame_abajo = frame.copy()
+                img_seg, estado_limpieza = self._aplicar_segmentacion(frame_abajo, mejor_box)
+                cv2.rectangle(img_seg, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(img_seg, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                try:
                     msg_segmentado = self._bridge.cv2_to_imgmsg(img_seg, encoding="bgr8")
-                    msg_segmentado.header.stamp = msg_raw_header
+                    msg_segmentado.header.stamp = self.get_clock().now().to_msg()
                     msg_segmentado.header.frame_id = "camara_logitech_c270"
                     self._pub_video_segmentado.publish(msg_segmentado)
-                except Exception as exc: pass
+                except Exception: pass
+
+                # Metadatos y veredicto
+                self._ultimo_veredicto = f"Elemento {tamano_label}: {estado_limpieza}"
 
                 msg_tam = Float32()
                 msg_tam.data = float(area * self.k_area)
@@ -450,10 +475,10 @@ class NodoCamara(Node):
                 msg_str.data = self._ultimo_veredicto
                 self._pub_analisis.publish(msg_str)
 
+                # ── Paso E: Transición de estado y comando al actuador ───────
                 self._estado_actual = 'ESPERA_RETIRO'
                 self._frames_vacio = 0
 
-                # Accionar mecanismo segun el veredicto de vision
                 msg_grados = Float32()
                 if estado_limpieza == "OPTIMO":
                     msg_grados.data = 90.0
@@ -485,14 +510,19 @@ class NodoCamara(Node):
                     self._pub_comando_grados.publish(msg_home)
                     self.get_logger().info("Objeto retirado → Publicando 0.0 grados (retorno a home).")
 
-                    # Limpiar visores con imagen negra
-                    frame_negro = np.zeros((480, 640, 3), dtype=np.uint8)
+                    # Resetear visores con imagen negra etiquetada
+                    img_reset = np.zeros((480, 640, 3), dtype=np.uint8)
+                    cv2.putText(
+                        img_reset, "ESPERANDO ELEMENTO...",
+                        (110, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (180, 180, 180), 2
+                    )
                     try:
-                        msg_negro = self._bridge.cv2_to_imgmsg(frame_negro, encoding="bgr8")
-                        msg_negro.header.stamp = self.get_clock().now().to_msg()
-                        msg_negro.header.frame_id = "camara_logitech_c270"
-                        self._pub_video_segmentado.publish(msg_negro)
-                        self._pub.publish(msg_negro)
+                        stamp_reset = self.get_clock().now().to_msg()
+                        msg_reset = self._bridge.cv2_to_imgmsg(img_reset, encoding="bgr8")
+                        msg_reset.header.stamp = stamp_reset
+                        msg_reset.header.frame_id = "camara_logitech_c270"
+                        self._pub_video_segmentado.publish(msg_reset)
+                        self._pub.publish(msg_reset)
                     except Exception: pass
 
                     msg_str = String()
