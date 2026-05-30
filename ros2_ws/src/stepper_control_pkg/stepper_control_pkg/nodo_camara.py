@@ -318,14 +318,21 @@ class NodoCamara(Node):
 
         estado_limpieza = "OPTIMO" if porcentaje < 0.10 else "ANOMALIA"
 
-        # Generacion de imagen segmentada (Visualizacion para la HMI)
-        anomalia_bgr = np.zeros_like(roi)
-        # Dibujar de rojo los pixeles detectados como anomalia
-        anomalia_bgr[mask_anomalia > 0] = [0, 0, 255]
+        # 1. Canvas global con fondo gris oscuro para contraste
+        canvas = np.ones_like(frame_bgr) * 50
 
-        # Canvas con fondo oscurecido
-        canvas = cv2.addWeighted(frame_copia, 0.3, np.zeros_like(frame_copia), 0, 0)
-        canvas[y1:y2, x1:x2] = anomalia_bgr
+        # 2. ROI original para aplicar la máscara
+        roi = frame_bgr[y1:y2, x1:x2]
+
+        # 3. Colorear anomalías en el ROI (sin tocar el canvas directamente)
+        roi_anomalias = np.zeros_like(roi)
+        roi_anomalias[mask_anomalia > 0] = [0, 0, 255]  # Rojo puro
+
+        # 4. Inyectar el ROI procesado en las coordenadas exactas del canvas
+        canvas[y1:y2, x1:x2] = roi_anomalias
+
+        # 5. BBox verde sobre el canvas global final
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
         return canvas, estado_limpieza
 
@@ -425,7 +432,7 @@ class NodoCamara(Node):
                 resultado = "grande" if area > 33000 else "chica"
                 tamano_label = "GRANDE" if resultado == "grande" else "CHICO"
 
-                # Visor superior: frame fresco con solo el BBox
+                # Paso 1: Visor superior — frame fresco con solo el BBox
                 img_raw = frame.copy()
                 cv2.rectangle(img_raw, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 try:
@@ -435,20 +442,27 @@ class NodoCamara(Node):
                     self._pub.publish(msg_raw_pub)
                 except Exception: pass
 
-                # Visor inferior: canvas fresco con máscara HSV roja
-                _, estado_limpieza = self._aplicar_segmentacion(frame.copy(), mejor_box)
-                # Construir canvas oscuro propio con solo la máscara roja
-                roi_x1 = max(0, x1); roi_y1 = max(0, y1)
-                roi_x2 = min(frame.shape[1], x2); roi_y2 = min(frame.shape[0], y2)
-                roi_hsv  = cv2.cvtColor(frame[roi_y1:roi_y2, roi_x1:roi_x2], cv2.COLOR_BGR2HSV)
-                mask_dark = cv2.inRange(roi_hsv, np.array([0, 0, 0]),   np.array([179, 255, 80]))
-                mask_sat  = cv2.inRange(roi_hsv, np.array([0, 100, 0]), np.array([179, 255, 255]))
-                mask_anomalia = cv2.bitwise_or(mask_dark, mask_sat)
-                canvas = np.zeros_like(frame)
-                canvas[roi_y1:roi_y2, roi_x1:roi_x2][mask_anomalia > 0] = [0, 0, 255]
-                cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                # Paso 2: Visor inferior — imagen de carga mientras se procesa
+                img_carga = np.zeros_like(frame)
+                cv2.putText(
+                    img_carga, "Analizando elemento...",
+                    (60, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 220, 255), 2,
+                    cv2.LINE_AA
+                )
                 try:
-                    msg_seg = self._bridge.cv2_to_imgmsg(canvas, encoding="bgr8")
+                    msg_carga = self._bridge.cv2_to_imgmsg(img_carga, encoding="bgr8")
+                    msg_carga.header.stamp = self.get_clock().now().to_msg()
+                    msg_carga.header.frame_id = "camara_logitech_c270"
+                    self._pub_video_segmentado.publish(msg_carga)
+                except Exception: pass
+
+                # Paso 3: Micro-delay no bloqueante via I/O de logger
+                self.get_logger().info("Analizando elemento — procesando mascara HSV...")
+
+                # Paso 4: Procesar HSV y publicar resultado en visor inferior
+                canvas_seg, estado_limpieza = self._aplicar_segmentacion(frame.copy(), mejor_box)
+                try:
+                    msg_seg = self._bridge.cv2_to_imgmsg(canvas_seg, encoding="bgr8")
                     msg_seg.header.stamp = self.get_clock().now().to_msg()
                     msg_seg.header.frame_id = "camara_logitech_c270"
                     self._pub_video_segmentado.publish(msg_seg)
