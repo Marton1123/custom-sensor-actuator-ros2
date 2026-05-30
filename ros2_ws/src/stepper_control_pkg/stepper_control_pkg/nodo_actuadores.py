@@ -56,7 +56,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
-from std_msgs.msg import Int32, Float32
+from std_msgs.msg import Int32, Float32, String
 
 
 # ── Constantes de dirección ───────────────────────────────────────────────
@@ -147,6 +147,13 @@ class NodoActuadores(Node):
             qos,
         )
 
+        self._sub_vision = self.create_subscription(
+            String,
+            "/objeto_detectado",
+            self._cb_objeto_detectado,
+            qos,
+        )
+
         # ── Inicialización GPIO ────────────────────────────────────────────
         self._h: int = self._init_gpio()
 
@@ -222,6 +229,31 @@ class NodoActuadores(Node):
             f"[/comando_grados] {grados:+.2f}° → {pasos:+d} pasos "
             f"(pasos_por_rev={pasos_por_rev})"
         )
+        self._lanzar_movimiento(pasos)
+
+    def _cb_objeto_detectado(self, msg: String) -> None:
+        """
+        Callback de /objeto_detectado.
+        Si es botella -> 360 grados horario.
+        Si es lata -> 360 grados antihorario.
+        """
+        objeto = msg.data.lower()
+        if not objeto:
+            return
+            
+        pasos_por_rev: int = (
+            self.get_parameter("pasos_por_rev").get_parameter_value().integer_value
+        )
+        
+        if objeto == "bottle":
+            self.get_logger().info("[IA] Botella detectada. Girando motor 360° CW.")
+            pasos = pasos_por_rev  # 360 grados = 1 rev
+        elif objeto == "can":
+            self.get_logger().info("[IA] Lata detectada. Girando motor 360° CCW.")
+            pasos = -pasos_por_rev # -360 grados = -1 rev
+        else:
+            return  # Ignorar si manda basura
+
         self._lanzar_movimiento(pasos)
 
     # ══════════════════════════════════════════════════════════════════════

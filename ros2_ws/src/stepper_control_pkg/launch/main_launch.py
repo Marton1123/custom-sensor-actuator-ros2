@@ -78,9 +78,21 @@ def generate_launch_description() -> LaunchDescription:
         parameters=[config_path]
     )
 
+    nodo_vision = Node(
+        package="ros2_vision_pkg",
+        executable="nodo_vision",
+        name="nodo_vision",
+        output="screen",
+        emulate_tty=True,
+        parameters=[{
+            "modelo_dir": os.path.expanduser('~/ros2_ws/models/botellas_vs_latas_ncnn')
+        }]
+    )
+
     return LaunchDescription([
         nodo_actuadores,
         nodo_camara,
+        nodo_vision,
         nodo_gui,
         nodo_balanza,
     ])
