@@ -19,10 +19,10 @@ GPIO lib : lgpio  (sudo apt install python3-lgpio)
 
 Conversión grados → pasos:
     pasos = int(round((grados / 360.0) * pasos_por_rev))
-    Con pasos_por_rev=3200 (microstepping 1/16):
-        90°  →  800 pasos
-        45°  →  400 pasos
-        1°   →    8.89 pasos ≈ 9 pasos
+    Con pasos_por_rev=800 (microstepping 1/4):
+        90°  →  200 pasos
+        45°  →  100 pasos
+        1°   →    2.22 pasos ≈ 2 pasos
 
 Velocidad:
     El parámetro 'delay_pulso' (s) controla el tiempo de cada semi-ciclo del
@@ -75,10 +75,10 @@ class NodoActuadores(Node):
         gpio_chip    (int)   : chip GPIO [default: 4  → /dev/gpiochip4 en RPi5]
         pin_step     (int)   : pin PUL+  [default: 17]
         pin_dir      (int)   : pin DIR+  [default: 27]
-        pasos_por_rev(int)   : pasos/revolución incluyendo microstepping [default: 3200]
-        delay_pulso  (float) : semi-ciclo del pulso STEP en segundos     [default: 0.0005]
+        pasos_por_rev(int)   : pasos/revolución incluyendo microstepping [default: 800]
+        delay_pulso  (float) : semi-ciclo del pulso STEP en segundos     [default: 0.0015]
                                → Periodo completo = 2 × delay_pulso
-                               → 0.0005 s → 1 ms/ciclo → 1000 pasos/s → ≈18.75 RPM
+                               → 0.0015 s → 3 ms/ciclo → 333.3 pasos/s → ≈25 RPM
     """
 
     TOPIC_COMANDO_MOTOR  = "/comando_motor"
@@ -100,8 +100,8 @@ class NodoActuadores(Node):
         self.declare_parameter("gpio_chip",    4)
         self.declare_parameter("pin_step",    17)
         self.declare_parameter("pin_dir",     27)
-        self.declare_parameter("pasos_por_rev", 3200)
-        self.declare_parameter("delay_pulso",   0.0005)
+        self.declare_parameter("pasos_por_rev", 800)
+        self.declare_parameter("delay_pulso",   0.0015)
 
         self._gpio_chip:     int = self.get_parameter("gpio_chip").get_parameter_value().integer_value
         self._pin_step:      int = self.get_parameter("pin_step").get_parameter_value().integer_value
@@ -205,10 +205,10 @@ class NodoActuadores(Node):
         Conversión:
             pasos = int(round((grados / 360.0) * pasos_por_rev))
 
-        Ejemplos con pasos_por_rev=3200:
-            +90.0°  →  +800 pasos  (CW)
-            -45.5°  →  -404 pasos  (CCW)
-            +360.0° → +3200 pasos  (1 vuelta completa CW)
+        Ejemplos con pasos_por_rev=800:
+            +90.0°  →  +200 pasos  (CW)
+            -45.5°  →  -101 pasos  (CCW)
+            +360.0° → +800 pasos  (1 vuelta completa CW)
                0.0° →    0 pasos   (stop)
         """
         grados = msg.data
