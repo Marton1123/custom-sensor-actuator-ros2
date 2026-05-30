@@ -81,7 +81,7 @@ class NodoCamara(Node):
         """Intenta abrir la camara iterando sobre puertos 0-5 para evitar nodos de metadatos V4L2."""
         import time
         for i in range(6):
-            cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
+            cap = cv2.VideoCapture(f'/dev/video{i}', cv2.CAP_V4L2)
             if cap.isOpened():
                 for _ in range(3):  # Give the camera a moment to warm up
                     ret, frame = cap.read()
