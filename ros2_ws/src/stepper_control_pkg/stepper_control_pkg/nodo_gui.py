@@ -210,6 +210,7 @@ class VentanaPrincipal(QMainWindow):
         self.lbl_banner = QLabel("Esperando elemento... Coloque el objeto en el sistema.")
         self.lbl_banner.setObjectName("lbl_banner")
         self.lbl_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_banner.setWordWrap(True)
         self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
         layout.addWidget(self.lbl_banner)
 

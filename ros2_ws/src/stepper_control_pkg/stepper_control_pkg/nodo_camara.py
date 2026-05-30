@@ -425,43 +425,33 @@ class NodoCamara(Node):
                 resultado = "grande" if area > 33000 else "chica"
                 tamano_label = "GRANDE" if resultado == "grande" else "CHICO"
 
-                # ── Paso A: Fijar imagen superior con solo el BBox ──────────
-                frame_arriba = frame.copy()
-                cv2.rectangle(frame_arriba, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                # Visor superior: frame fresco con solo el BBox
+                img_raw = frame.copy()
+                cv2.rectangle(img_raw, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 try:
-                    msg_raw_pub = self._bridge.cv2_to_imgmsg(frame_arriba, encoding="bgr8")
+                    msg_raw_pub = self._bridge.cv2_to_imgmsg(img_raw, encoding="bgr8")
                     msg_raw_pub.header.stamp = msg_raw_header
                     msg_raw_pub.header.frame_id = "camara_logitech_c270"
                     self._pub.publish(msg_raw_pub)
                 except Exception: pass
 
-                # ── Paso B: Imagen inferior con banner de carga ────────────
-                img_cargando = np.zeros((480, 640, 3), dtype=np.uint8)
-                cv2.putText(
-                    img_cargando, "ANALIZANDO ELEMENTO...",
-                    (80, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 220, 255), 2
-                )
+                # Visor inferior: canvas fresco con máscara HSV roja
+                _, estado_limpieza = self._aplicar_segmentacion(frame.copy(), mejor_box)
+                # Construir canvas oscuro propio con solo la máscara roja
+                roi_x1 = max(0, x1); roi_y1 = max(0, y1)
+                roi_x2 = min(frame.shape[1], x2); roi_y2 = min(frame.shape[0], y2)
+                roi_hsv  = cv2.cvtColor(frame[roi_y1:roi_y2, roi_x1:roi_x2], cv2.COLOR_BGR2HSV)
+                mask_dark = cv2.inRange(roi_hsv, np.array([0, 0, 0]),   np.array([179, 255, 80]))
+                mask_sat  = cv2.inRange(roi_hsv, np.array([0, 100, 0]), np.array([179, 255, 255]))
+                mask_anomalia = cv2.bitwise_or(mask_dark, mask_sat)
+                canvas = np.zeros_like(frame)
+                canvas[roi_y1:roi_y2, roi_x1:roi_x2][mask_anomalia > 0] = [0, 0, 255]
+                cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 try:
-                    msg_cargando = self._bridge.cv2_to_imgmsg(img_cargando, encoding="bgr8")
-                    msg_cargando.header.stamp = msg_raw_header
-                    msg_cargando.header.frame_id = "camara_logitech_c270"
-                    self._pub_video_segmentado.publish(msg_cargando)
-                except Exception: pass
-
-                # ── Paso C: Retraso artificial para que el usuario lea el mensaje
-                time.sleep(0.5)
-
-                # ── Paso D: Procesar HSV y publicar resultado en imagen inferior
-                frame_abajo = frame.copy()
-                img_seg, estado_limpieza = self._aplicar_segmentacion(frame_abajo, mejor_box)
-                cv2.rectangle(img_seg, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(img_seg, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                try:
-                    msg_segmentado = self._bridge.cv2_to_imgmsg(img_seg, encoding="bgr8")
-                    msg_segmentado.header.stamp = self.get_clock().now().to_msg()
-                    msg_segmentado.header.frame_id = "camara_logitech_c270"
-                    self._pub_video_segmentado.publish(msg_segmentado)
+                    msg_seg = self._bridge.cv2_to_imgmsg(canvas, encoding="bgr8")
+                    msg_seg.header.stamp = self.get_clock().now().to_msg()
+                    msg_seg.header.frame_id = "camara_logitech_c270"
+                    self._pub_video_segmentado.publish(msg_seg)
                 except Exception: pass
 
                 # Metadatos y veredicto
@@ -475,7 +465,7 @@ class NodoCamara(Node):
                 msg_str.data = self._ultimo_veredicto
                 self._pub_analisis.publish(msg_str)
 
-                # ── Paso E: Transición de estado y comando al actuador ───────
+                # Transición de estado y comando al actuador
                 self._estado_actual = 'ESPERA_RETIRO'
                 self._frames_vacio = 0
 
@@ -510,19 +500,13 @@ class NodoCamara(Node):
                     self._pub_comando_grados.publish(msg_home)
                     self.get_logger().info("Objeto retirado → Publicando 0.0 grados (retorno a home).")
 
-                    # Resetear visores con imagen negra etiquetada
-                    img_reset = np.zeros((480, 640, 3), dtype=np.uint8)
-                    cv2.putText(
-                        img_reset, "ESPERANDO ELEMENTO...",
-                        (110, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (180, 180, 180), 2
-                    )
+                    # Resetear solo el visor inferior con un canvas negro limpio
+                    frame_negro = np.zeros((480, 640, 3), dtype=np.uint8)
                     try:
-                        stamp_reset = self.get_clock().now().to_msg()
-                        msg_reset = self._bridge.cv2_to_imgmsg(img_reset, encoding="bgr8")
-                        msg_reset.header.stamp = stamp_reset
-                        msg_reset.header.frame_id = "camara_logitech_c270"
-                        self._pub_video_segmentado.publish(msg_reset)
-                        self._pub.publish(msg_reset)
+                        msg_negro = self._bridge.cv2_to_imgmsg(frame_negro, encoding="bgr8")
+                        msg_negro.header.stamp = self.get_clock().now().to_msg()
+                        msg_negro.header.frame_id = "camara_logitech_c270"
+                        self._pub_video_segmentado.publish(msg_negro)
                     except Exception: pass
 
                     msg_str = String()
