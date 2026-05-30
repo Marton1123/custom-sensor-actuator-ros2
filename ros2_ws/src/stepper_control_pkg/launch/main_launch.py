@@ -85,7 +85,7 @@ def generate_launch_description() -> LaunchDescription:
         output="screen",
         emulate_tty=True,
         parameters=[{
-            "modelo_dir": os.path.expanduser('~/ros2_ws/models/botellas_vs_latas_ncnn')
+            "modelo_dir": os.path.expanduser('~/custom-sensor-actuator-ros2/IA/models/botellas_vs_latas_ncnn')
         }]
     )
 
