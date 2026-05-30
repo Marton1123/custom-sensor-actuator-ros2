@@ -12,6 +12,11 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'models', 'botellas_vs_latas_ncnn'), 
+         glob('../../../IA/models/botellas_vs_latas_ncnn/*.bin') + 
+         glob('../../../IA/models/botellas_vs_latas_ncnn/*.param') + 
+         glob('../../../IA/models/botellas_vs_latas_ncnn/*.yaml') + 
+         glob('../../../IA/models/botellas_vs_latas_ncnn/*.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
