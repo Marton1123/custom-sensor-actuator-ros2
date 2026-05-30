@@ -164,6 +164,7 @@ class NodoCamara(Node):
         self._frames_analizando = 0   # Contador de frames en estado ANALIZANDO
         self._frames_vacio      = 0   # Contador de frames sin deteccion en ESPERA_RETIRO
         self._ultimo_veredicto  = ""
+        self._ultimo_estado_hsv = None   # 'OPTIMO' o 'ANOMALIA' — controla logica de home
         self._frame_congelado   = None   # Copia estatica del frame al alcanzar umbral
         self._bbox_congelado    = None   # BBox correspondiente al frame congelado
         self._canvas_veredicto  = None   # Imagen HSV resultado de _aplicar_segmentacion
@@ -391,7 +392,7 @@ class NodoCamara(Node):
                     mejor_conf = d["conf"]
                     mejor_box  = d
 
-            # Canvas fijo inferior: texto ESPERANDO
+            # Canvas inferior SIEMPRE publicado a 30 FPS (evita parpadeo)
             canvas_espera = np.zeros((480, 640, 3), dtype=np.uint8)
             cv2.putText(
                 canvas_espera, "ESPERANDO ELEMENTO...",
@@ -457,18 +458,18 @@ class NodoCamara(Node):
         elif self._estado_actual == 'ANALIZANDO':
             self._frames_analizando += 1
 
-            # Visor superior: frame congelado con BBox
+            # Visor superior: frame blindado (copia segura, nunca mutar el atributo)
             if self._frame_congelado is not None and self._bbox_congelado is not None:
                 bx = self._bbox_congelado
-                img_freeze = self._frame_congelado.copy()
+                img_raw_segura = self._frame_congelado.copy()  # blindaje de memoria
                 cv2.rectangle(
-                    img_freeze,
+                    img_raw_segura,
                     (int(bx["x1"]), int(bx["y1"])),
                     (int(bx["x2"]), int(bx["y2"])),
                     (0, 255, 0), 2
                 )
                 try:
-                    msg_raw = self._bridge.cv2_to_imgmsg(img_freeze, encoding="bgr8")
+                    msg_raw = self._bridge.cv2_to_imgmsg(img_raw_segura, encoding="bgr8")
                     msg_raw.header.stamp = stamp
                     msg_raw.header.frame_id = "camara_logitech_c270"
                     self._pub.publish(msg_raw)
@@ -491,9 +492,10 @@ class NodoCamara(Node):
             if self._frames_analizando >= 15:
                 bbox = self._bbox_congelado
                 canvas_hsv, estado_limpieza = self._aplicar_segmentacion(
-                    self._frame_congelado.copy(), bbox
+                    self._frame_congelado.copy(), bbox  # copia: no mutar el atributo
                 )
-                self._canvas_veredicto = canvas_hsv
+                self._canvas_veredicto  = canvas_hsv
+                self._ultimo_estado_hsv = estado_limpieza  # guardado para logica de home
 
                 ancho = int(bbox["x2"]) - int(bbox["x1"])
                 alto  = int(bbox["y2"]) - int(bbox["y1"])
@@ -509,14 +511,20 @@ class NodoCamara(Node):
                 msg_str.data = self._ultimo_veredicto
                 self._pub_analisis.publish(msg_str)
 
-                msg_grados = Float32()
+                # Logica mecanica: OPTIMO activa el actuador, ANOMALIA es rechazo pasivo
                 if estado_limpieza == "OPTIMO":
+                    msg_grados = Float32()
                     msg_grados.data = 90.0
-                    self.get_logger().info("Veredicto OPTIMO → 90.0 grados (aceptacion).")
+                    self._pub_comando_grados.publish(msg_grados)
+                    self.get_logger().info("Veredicto OPTIMO → 90.0 grados (aceptacion activa).")
                 else:
-                    msg_grados.data = -90.0
-                    self.get_logger().info("Veredicto ANOMALIA → -90.0 grados (rechazo).")
-                self._pub_comando_grados.publish(msg_grados)
+                    # ANOMALIA: motor bloqueado en home, sin movimiento
+                    msg_grados = Float32()
+                    msg_grados.data = 0.0
+                    self._pub_comando_grados.publish(msg_grados)
+                    self.get_logger().info(
+                        "Veredicto ANOMALIA → 0.0 grados (rechazo pasivo, motor en home)."
+                    )
 
                 self._frames_vacio  = 0
                 self._estado_actual = 'ESPERA_RETIRO'
@@ -535,18 +543,18 @@ class NodoCamara(Node):
                 if d["conf"] > mejor_conf:
                     mejor_conf = d["conf"]
 
-            # Visor superior: frame congelado permanente
+            # Visor superior: frame blindado (copia segura, nunca mutar el atributo)
             if self._frame_congelado is not None and self._bbox_congelado is not None:
                 bx = self._bbox_congelado
-                img_freeze = self._frame_congelado.copy()
+                img_raw_segura = self._frame_congelado.copy()  # blindaje de memoria
                 cv2.rectangle(
-                    img_freeze,
+                    img_raw_segura,
                     (int(bx["x1"]), int(bx["y1"])),
                     (int(bx["x2"]), int(bx["y2"])),
                     (0, 255, 0), 2
                 )
                 try:
-                    msg_raw = self._bridge.cv2_to_imgmsg(img_freeze, encoding="bgr8")
+                    msg_raw = self._bridge.cv2_to_imgmsg(img_raw_segura, encoding="bgr8")
                     msg_raw.header.stamp = stamp
                     msg_raw.header.frame_id = "camara_logitech_c270"
                     self._pub.publish(msg_raw)
@@ -576,11 +584,17 @@ class NodoCamara(Node):
 
             # Transicion de vuelta a BUSQUEDA
             if self._frames_vacio >= 30:
-                # Comando home al actuador
-                msg_home = Float32()
-                msg_home.data = 0.0
-                self._pub_comando_grados.publish(msg_home)
-                self.get_logger().info("Objeto retirado → 0.0 grados (home). Retorno a BUSQUEDA.")
+                # Comando home: solo si el elemento fue aceptado (OPTIMO)
+                ultimo_estado_hsv = getattr(self, "_ultimo_estado_hsv", "ANOMALIA")
+                if ultimo_estado_hsv == "OPTIMO":
+                    msg_home = Float32()
+                    msg_home.data = 0.0
+                    self._pub_comando_grados.publish(msg_home)
+                    self.get_logger().info("Retiro confirmado (OPTIMO) → 0.0 grados (home).")
+                else:
+                    self.get_logger().info(
+                        "Retiro confirmado (ANOMALIA) → motor ya en home, sin comando adicional."
+                    )
 
                 # Resetear visor inferior con canvas negro
                 frame_negro = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -591,13 +605,14 @@ class NodoCamara(Node):
                     self._pub_video_segmentado.publish(msg_negro)
                 except Exception: pass
 
-                # Limpiar estado
+                # Limpiar estado completo
                 self._frames_botella    = 0
                 self._frames_analizando = 0
                 self._frames_vacio      = 0
                 self._frame_congelado   = None
                 self._bbox_congelado    = None
                 self._canvas_veredicto  = None
+                self._ultimo_estado_hsv = None
                 self._estado_actual     = 'BUSQUEDA'
 
                 msg_str = String()
