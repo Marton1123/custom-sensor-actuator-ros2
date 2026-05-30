@@ -295,17 +295,11 @@ class NodoActuadores(Node):
         dir_str    = "CW (+)" if pasos > 0 else "CCW (-)"
 
         # Lee delay_pulso en el momento de inicio (recoge ros2 param set)
-        delay_objetivo: float = (
+        delay: float = (
             self.get_parameter("delay_pulso").get_parameter_value().double_value
         )
-        
-        # Parámetros de rampa
-        delay_inicial = 0.005
-        pasos_rampa = 150  # Pasos de rampa para 1600 ppr (suaviza la transición)
-        if n_pasos < pasos_rampa * 2:
-            pasos_rampa = n_pasos // 2
-
-        periodo_ms = delay_objetivo * 2 * 1000   # periodo crucero en ms (para log)
+        periodo_ms = delay * 2 * 1000   # periodo completo en ms (solo para log)
+        tiempo_total_s = n_pasos * delay * 2
 
         # ── Fija la dirección y da tiempo de setup al TB6600 ──────────────
         lgpio.gpio_write(self._h, self._pin_dir, direccion)
@@ -313,12 +307,13 @@ class NodoActuadores(Node):
 
         self.get_logger().info(
             f"Movimiento iniciado | {dir_str} | {n_pasos} pasos | "
-            f"delay_crucero={delay_objetivo*1000:.2f} ms | rampa={pasos_rampa} pasos"
+            f"delay={delay*1000:.2f} ms/semi-ciclo | periodo={periodo_ms:.2f} ms | "
+            f"tiempo estimado={tiempo_total_s:.2f} s"
         )
 
         pasos_hechos = 0
 
-        for i in range(n_pasos):
+        for _ in range(n_pasos):
 
             # Comprueba cancelación antes de cada pulso
             if self._cancelar.is_set():
@@ -327,24 +322,11 @@ class NodoActuadores(Node):
                 )
                 break
 
-            # Calcular delay actual (rampa trapezoidal)
-            if i < pasos_rampa:
-                # Aceleración
-                progreso = i / pasos_rampa
-                delay_actual = delay_inicial - progreso * (delay_inicial - delay_objetivo)
-            elif i >= n_pasos - pasos_rampa:
-                # Desaceleración
-                progreso = (n_pasos - i) / pasos_rampa
-                delay_actual = delay_inicial - progreso * (delay_inicial - delay_objetivo)
-            else:
-                # Velocidad crucero
-                delay_actual = delay_objetivo
-
             # ── Pulso STEP ────────────────────────────────────────────────
             lgpio.gpio_write(self._h, self._pin_step, 1)   # flanco de subida
-            time.sleep(delay_actual)                       # HIGH durante delay
+            time.sleep(delay)                               # HIGH durante delay
             lgpio.gpio_write(self._h, self._pin_step, 0)   # flanco de bajada
-            time.sleep(delay_actual)                       # LOW durante delay
+            time.sleep(delay)                               # LOW durante delay
 
             pasos_hechos += 1
 
