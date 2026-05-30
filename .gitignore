@@ -1,0 +1,10 @@
+# Ignorar todo dentro de la carpeta raw (pipeline IA)
+IA/data/raw/*
+# Excepción: no ignorar el archivo .gitkeep
+!IA/data/raw/.gitkeep
+
+IA/data/_fiftyone_zoo/*
+
+!IA/data/_fiftyone_zoo/.gitkeep
+
+data/processed/
