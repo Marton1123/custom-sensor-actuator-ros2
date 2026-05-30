@@ -10,6 +10,8 @@ import os
 import cv2
 import numpy as np
 import math
+import threading
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -105,6 +107,13 @@ class NodoVision(Node):
         self._last_best_obj = None
         self._last_best_box = None
         self._last_best_score = 0.0
+        
+        # Hilo de inferencia
+        self._inference_lock = threading.Lock()
+        self._frame_for_inference = None
+        self._latest_inference = {"best_obj": "", "best_score": 0.0, "best_box": None}
+        self._inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
+        self._inference_thread.start()
         
         # Pre-allocate canvas
         self._canvas_espera = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -304,6 +313,51 @@ class NodoVision(Node):
             )
             return [], [], []
 
+    def _inference_loop(self):
+        while rclpy.ok():
+            with self._inference_lock:
+                frame = self._frame_for_inference
+                self._frame_for_inference = None
+
+            if frame is None:
+                time.sleep(0.01)
+                continue
+
+            img_h, img_w = frame.shape[:2]
+            scale = min(self.input_size / img_w, self.input_size / img_h)
+            new_w = int(img_w * scale)
+            new_h = int(img_h * scale)
+            pad_w = (self.input_size - new_w) // 2
+            pad_h = (self.input_size - new_h) // 2
+
+            resized_img = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            canvas = np.full((self.input_size, self.input_size, 3), 114, dtype=np.uint8)
+            canvas[pad_h:pad_h+new_h, pad_w:pad_w+new_w] = resized_img
+
+            mat_in = ncnn.Mat.from_pixels(canvas, ncnn.Mat.PixelType.PIXEL_BGR2RGB, self.input_size, self.input_size)
+            mat_in.substract_mean_normalize([0.0, 0.0, 0.0], [1/255.0, 1/255.0, 1/255.0])
+
+            ex = self.net.create_extractor()
+            ex.input("in0", mat_in)
+            ret, mat_out = ex.extract("out0")
+
+            best_obj = ""
+            best_score = 0.0
+            best_box = None
+
+            if ret == 0:
+                raw_output = np.array(mat_out)
+                boxes, scores, class_ids = self.decode_yolov8(raw_output, img_w, img_h, scale, scale, pad_w, pad_h)
+                if len(scores) > 0:
+                    best_idx = np.argmax(scores)
+                    best_score = scores[best_idx]
+                    cls_num = class_ids[best_idx]
+                    best_obj = self.classes.get(cls_num, "desconocido")
+                    best_box = boxes[best_idx]
+            
+            with self._inference_lock:
+                self._latest_inference = {"best_obj": best_obj, "best_score": best_score, "best_box": best_box}
+
     def image_callback(self, msg):
         try:
             img = self.bridge.imgmsg_to_cv2(msg, "bgr8")
@@ -317,41 +371,16 @@ class NodoVision(Node):
         out_area = 0.0
 
         scale = min(self.input_size / img_w, self.input_size / img_h)
-        new_w = int(img_w * scale)
-        new_h = int(img_h * scale)
-        pad_w = (self.input_size - new_w) // 2
-        pad_h = (self.input_size - new_h) // 2
-
-        best_obj = ""
-        best_score = 0.0
-        best_box = None
-
-        def run_inference():
-            nonlocal best_obj, best_score, best_box
-            resized_img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-            canvas = np.full((self.input_size, self.input_size, 3), 114, dtype=np.uint8)
-            canvas[pad_h:pad_h+new_h, pad_w:pad_w+new_w] = resized_img
-
-            mat_in = ncnn.Mat.from_pixels(canvas, ncnn.Mat.PixelType.PIXEL_BGR2RGB, self.input_size, self.input_size)
-            mat_in.substract_mean_normalize([0.0, 0.0, 0.0], [1/255.0, 1/255.0, 1/255.0])
-
-            ex = self.net.create_extractor()
-            ex.input("in0", mat_in)
-            ret, mat_out = ex.extract("out0")
-
-            if ret == 0:
-                raw_output = np.array(mat_out)
-                boxes, scores, class_ids = self.decode_yolov8(raw_output, img_w, img_h, scale, scale, pad_w, pad_h)
-                if len(scores) > 0:
-                    best_idx = np.argmax(scores)
-                    best_score = scores[best_idx]
-                    cls_num = class_ids[best_idx]
-                    best_obj = self.classes.get(cls_num, "desconocido")
-                    best_box = boxes[best_idx]
+        
+        with self._inference_lock:
+            if self._estado_actual in ['BUSQUEDA', 'ESPERA_RETIRO'] and self._frame_for_inference is None:
+                self._frame_for_inference = img.copy()
+            best_obj = self._latest_inference["best_obj"]
+            best_score = self._latest_inference["best_score"]
+            best_box = self._latest_inference["best_box"]
 
         # ---------------- FSM ----------------
         if self._estado_actual == 'BUSQUEDA':
-            run_inference()
             out_estado = "vacio"
             
             if best_obj in ["bottle", "can"]:
@@ -416,7 +445,6 @@ class NodoVision(Node):
                 self._frames_vacio = 0
 
         elif self._estado_actual == 'ESPERA_RETIRO':
-            run_inference()
             if best_obj in ["bottle", "can"] and best_score > 0.40:
                 self._frames_vacio = 0
             else:
