@@ -183,6 +183,7 @@ class VentanaPrincipal(QMainWindow):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self._build_ui()
         self._ultimo_peso = 0.0
+        self._ultimo_area = 0.0
         self._ultimo_estado = "vacio"
 
         self.senal_frame_raw.connect(self._actualizar_raw)
@@ -276,13 +277,20 @@ class VentanaPrincipal(QMainWindow):
         ))
 
     def _actualizar_peso(self, peso: float) -> None:
+        if abs(self._ultimo_peso - peso) < 0.01:
+            return
         self._ultimo_peso = peso
         self.lbl_peso.valor_label.setText(f"{peso:.1f}")
 
     def _actualizar_area(self, area: float) -> None:
+        if abs(self._ultimo_area - area) < 0.01:
+            return
+        self._ultimo_area = area
         self.lbl_area.valor_label.setText(f"{area:.1f}")
 
     def _actualizar_estado(self, estado: str) -> None:
+        if self._ultimo_estado == estado:
+            return
         self._ultimo_estado = estado
         self.lbl_estado.valor_label.setText(estado.upper().split()[0] if " " in estado else estado.upper())
         

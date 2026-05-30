@@ -315,8 +315,8 @@ class NodoVision(Node):
             return
 
         img_h, img_w = img.shape[:2]
-        out_raw = img
-        out_seg = self._canvas_espera
+        out_raw = img.copy()
+        out_seg = self._canvas_espera.copy()
         out_estado = self._ultimo_veredicto
         out_area = 0.0
 
@@ -374,7 +374,6 @@ class NodoVision(Node):
                 self._last_best_obj = None
             
             if best_obj in ["bottle", "can"]:
-                out_raw = img.copy()
                 bx1, by1, bx2, by2 = map(int, best_box)
                 cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (0, 255, 0), 2)
                 cv2.putText(out_raw, f"{best_obj.upper()} {best_score:.2f}", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
@@ -393,7 +392,6 @@ class NodoVision(Node):
             bx1, by1, bx2, by2 = map(int, self._box_congelado)
             
             clase_str = "LATA" if self._id_congelado == "can" else "BOTELLA"
-            out_raw = img.copy()
             cv2.putText(out_raw, f"ANALIZANDO {clase_str}...", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (0, 255, 255), 2)
             
@@ -435,7 +433,6 @@ class NodoVision(Node):
                 out_seg = np.zeros((480, 640, 3), dtype=np.uint8)
                 cv2.putText(out_seg, 'LATA ACEPTADA', (180, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
             
-            out_raw = img.copy()
             bx1, by1, bx2, by2 = map(int, self._box_congelado)
             cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (255, 0, 0), 2)
             clase_str = "LATA" if self._id_congelado == "can" else "BOTELLA"
@@ -463,11 +460,11 @@ class NodoVision(Node):
 
         msg_raw = self.bridge.cv2_to_imgmsg(out_raw_c, encoding="bgr8")
         msg_raw.header = msg.header
-        msg_raw.header.frame_id = "nodo_vision_procesado"
+        msg_raw.header.frame_id = "nodo_vision_procesado_raw"
         
         msg_seg = self.bridge.cv2_to_imgmsg(out_seg_c, encoding="bgr8")
         msg_seg.header = msg.header
-        msg_seg.header.frame_id = "nodo_vision_procesado"
+        msg_seg.header.frame_id = "nodo_vision_procesado_seg"
 
         self.pub_raw.publish(msg_raw)
         self.pub_seg.publish(msg_seg)
