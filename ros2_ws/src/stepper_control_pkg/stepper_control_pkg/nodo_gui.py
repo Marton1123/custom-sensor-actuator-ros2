@@ -79,7 +79,7 @@ class NodoGUI(Node):
     mediante señales thread-safe. No contiene lógica de negocio.
 
     Suscripciones:
-        /camara/video_raw (sensor_msgs/Image): Flujo de video anotado.
+        /camara/video_procesado (sensor_msgs/Image): Flujo de video anotado.
         /camara/video_segmentado (sensor_msgs/Image): Mapa de anomalías HSV.
         /peso_elemento (std_msgs/Float32): Peso en gramos del sensor de carga.
         /tamano_estimado (std_msgs/Float32): Área estimada del objetivo en cm².
@@ -99,7 +99,7 @@ class NodoGUI(Node):
         self._fn_area = None
         self._fn_estado = None
 
-        self.create_subscription(Image, "/camara/video_raw", self._cb_camara_raw, QOS_VIDEO)
+        self.create_subscription(Image, "/camara/video_procesado", self._cb_camara_raw, QOS_VIDEO)
         self.create_subscription(Image, "/camara/video_segmentado", self._cb_camara_seg, QOS_VIDEO)
         self.create_subscription(Float32, "/peso_elemento", self._cb_peso, 10)
         self.create_subscription(Float32, "/tamano_estimado", self._cb_area, 10)

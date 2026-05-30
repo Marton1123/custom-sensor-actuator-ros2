@@ -148,7 +148,7 @@ class NodoVision(Node):
         )
 
         # Publicadores unificados (SPoP)
-        self.pub_raw = self.create_publisher(Image, '/camara/video_raw', qos_profile)
+        self.pub_raw = self.create_publisher(Image, '/camara/video_procesado', qos_profile)
         self.pub_seg = self.create_publisher(Image, '/camara/video_segmentado', qos_profile)
         self.pub_clasificacion = self.create_publisher(String, '/clasificacion_objeto', 10)
         self.pub_tamano = self.create_publisher(Float32, '/tamano_estimado', 10)
@@ -305,10 +305,6 @@ class NodoVision(Node):
             return [], [], []
 
     def image_callback(self, msg):
-        # Proteccion anti-loop si compartimos el topico
-        if msg.header.frame_id == "nodo_vision_procesado":
-            return
-
         try:
             img = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except Exception:
@@ -459,11 +455,11 @@ class NodoVision(Node):
         out_seg_c = np.ascontiguousarray(out_seg)
 
         msg_raw = self.bridge.cv2_to_imgmsg(out_raw_c, encoding="bgr8")
-        msg_raw.header = msg.header
+        msg_raw.header.stamp = msg.header.stamp
         msg_raw.header.frame_id = "nodo_vision_procesado_raw"
         
         msg_seg = self.bridge.cv2_to_imgmsg(out_seg_c, encoding="bgr8")
-        msg_seg.header = msg.header
+        msg_seg.header.stamp = msg.header.stamp
         msg_seg.header.frame_id = "nodo_vision_procesado_seg"
 
         self.pub_raw.publish(msg_raw)
