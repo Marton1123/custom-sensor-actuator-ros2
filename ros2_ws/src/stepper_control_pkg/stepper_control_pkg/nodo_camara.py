@@ -159,11 +159,14 @@ class NodoCamara(Node):
         self._pub_foto_anotada = self.create_publisher(Image, "/camara/foto_anotada", QOS_VIDEO)
         self._pub_comando_grados = self.create_publisher(Float32, "/comando_grados", 10)
         
-        self._estado_actual = 'BUSQUEDA'
-        self._frames_botella = 0
-        self._frames_vacio = 0
-        self._ultimo_veredicto = ""
-        
+        self._estado_actual     = 'BUSQUEDA'
+        self._frames_botella    = 0   # Contador de frames con deteccion estable
+        self._frames_analizando = 0   # Contador de frames en estado ANALIZANDO
+        self._frames_vacio      = 0   # Contador de frames sin deteccion en ESPERA_RETIRO
+        self._ultimo_veredicto  = ""
+        self._frame_congelado   = None   # Copia estatica del frame al alcanzar umbral
+        self._bbox_congelado    = None   # BBox correspondiente al frame congelado
+        self._canvas_veredicto  = None   # Imagen HSV resultado de _aplicar_segmentacion
         self._ultimo_segmentado = None
 
         # Parametros de IA (NCNN)
@@ -339,13 +342,17 @@ class NodoCamara(Node):
     def _publicar_frame(self) -> None:
         """Callback de temporizador (~30 FPS). Orquesta la máquina de estados de visión.
 
-        En estado BUSQUEDA ejecuta inferencia en cada fotograma. Al confirmar la
-        presencia de un objetivo durante 15 fotogramas consecutivos, aplica
-        segmentación HSV y emite el veredicto final, transitando a ESPERA_RETIRO.
-
-        En estado ESPERA_RETIRO mantiene el veredicto activo hasta que el objetivo
-        desaparece del campo visual durante 30 fotogramas, retornando a BUSQUEDA.
+        Estados:
+            BUSQUEDA      : YOLO activo. Acumula frames con detección. Publica feed
+                            en vivo en /video_raw y texto 'ESPERANDO' en /video_segmentado.
+            ANALIZANDO    : YOLO inactivo. Congela el frame. Publica frame congelado
+                            en /video_raw y texto 'ANALIZANDO' en /video_segmentado
+                            durante 15 frames (~0.5 s) antes de ejecutar el filtro HSV.
+            ESPERA_RETIRO : YOLO activo para detectar retirada del objeto. Mantiene
+                            frame congelado en /video_raw y canvas HSV en /video_segmentado.
+            (retorno)     : Tras 30 frames vacios vuelve a BUSQUEDA y resetea todo.
         """
+        # ── Guardias de disponibilidad de frame ──────────────────────────
         if not self._captura.isOpened():
             self._fallos_consecutivos += 1
             if self._fallos_consecutivos >= MAX_FALLOS_CONSECUTIVOS:
@@ -370,105 +377,128 @@ class NodoCamara(Node):
 
         self._fallos_consecutivos = 0
         self._frame_count += 1
+        stamp = self.get_clock().now().to_msg()
 
-        msg_raw_header = self.get_clock().now().to_msg()
-        detections = self._inferir(frame)
-        mejor_conf = 0.0
-        mejor_box = None
-
-        for d in detections:
-            if d["conf"] > mejor_conf:
-                mejor_conf = d["conf"]
-                mejor_box = d
-
+        # ══════════════════════════════════════════════════════════════════
+        # FASE 1: BUSQUEDA — YOLO activo, feed en vivo
+        # ══════════════════════════════════════════════════════════════════
         if self._estado_actual == 'BUSQUEDA':
-            if mejor_box is not None and mejor_conf >= 0.65:
-                self._frames_botella += 1
-            else:
+            detections = self._inferir(frame)
+            mejor_conf = 0.0
+            mejor_box  = None
+            for d in detections:
+                if d["conf"] > mejor_conf:
+                    mejor_conf = d["conf"]
+                    mejor_box  = d
+
+            # Canvas fijo inferior: texto ESPERANDO
+            canvas_espera = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(
+                canvas_espera, "ESPERANDO ELEMENTO...",
+                (55, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (180, 180, 180), 2, cv2.LINE_AA
+            )
+            try:
+                msg_seg = self._bridge.cv2_to_imgmsg(canvas_espera, encoding="bgr8")
+                msg_seg.header.stamp = stamp
+                msg_seg.header.frame_id = "camara_logitech_c270"
+                self._pub_video_segmentado.publish(msg_seg)
+            except Exception: pass
+
+            if mejor_box is None or mejor_conf < 0.65:
+                # Sin deteccion: feed limpio en vivo
                 self._frames_botella = 0
                 try:
                     msg_raw = self._bridge.cv2_to_imgmsg(frame, encoding="bgr8")
-                    msg_raw.header.stamp = msg_raw_header
+                    msg_raw.header.stamp = stamp
                     msg_raw.header.frame_id = "camara_logitech_c270"
                     self._pub.publish(msg_raw)
-                except Exception as exc: pass
-                
+                except Exception: pass
                 msg_str = String()
                 msg_str.data = "vacio"
                 self._pub_analisis.publish(msg_str)
                 return
 
-            x1, y1 = int(mejor_box["x1"]), int(mejor_box["y1"])
-            x2, y2 = int(mejor_box["x2"]), int(mejor_box["y2"])
-            ancho = x2 - x1
-            alto = y2 - y1
-            area = ancho * alto
-            resultado = "grande" if area > 33000 else "chica"
+            # Deteccion valida: acumular frames
+            self._frames_botella += 1
+            x1 = int(mejor_box["x1"]); y1 = int(mejor_box["y1"])
+            x2 = int(mejor_box["x2"]); y2 = int(mejor_box["y2"])
 
-            if self._frames_botella < 15:
-                frame_raw_limpio = frame.copy()
-                cv2.rectangle(frame_raw_limpio, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(frame_raw_limpio, f"CONF: {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                
-                try:
-                    msg_raw = self._bridge.cv2_to_imgmsg(frame_raw_limpio, encoding="bgr8")
-                    msg_raw.header.stamp = msg_raw_header
-                    msg_raw.header.frame_id = "camara_logitech_c270"
-                    self._pub.publish(msg_raw)
-                except Exception as exc: pass
+            # Feed en vivo con BBox
+            img_vivo = frame.copy()
+            cv2.rectangle(img_vivo, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(img_vivo, f"CONF: {mejor_conf:.2f}",
+                        (x1, max(0, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            try:
+                msg_raw = self._bridge.cv2_to_imgmsg(img_vivo, encoding="bgr8")
+                msg_raw.header.stamp = stamp
+                msg_raw.header.frame_id = "camara_logitech_c270"
+                self._pub.publish(msg_raw)
+            except Exception: pass
 
-                msg_str = String()
-                msg_str.data = "analizando"
-                self._pub_analisis.publish(msg_str)
-                return
+            msg_str = String()
+            msg_str.data = "analizando"
+            self._pub_analisis.publish(msg_str)
 
+            # Transicion al estado ANALIZANDO
             if self._frames_botella >= 15:
-                x1, y1 = int(mejor_box["x1"]), int(mejor_box["y1"])
-                x2, y2 = int(mejor_box["x2"]), int(mejor_box["y2"])
-                ancho = x2 - x1
-                alto  = y2 - y1
-                area  = ancho * alto
-                resultado = "grande" if area > 33000 else "chica"
-                tamano_label = "GRANDE" if resultado == "grande" else "CHICO"
+                self._frame_congelado  = frame.copy()
+                self._bbox_congelado   = mejor_box
+                self._frames_analizando = 0
+                self._estado_actual    = 'ANALIZANDO'
+                self.get_logger().info(
+                    f"Objeto estabilizado ({self._frames_botella} frames). "
+                    "Transicion a ANALIZANDO."
+                )
+            return
 
-                # Paso 1: Visor superior — frame fresco con solo el BBox
-                img_raw = frame.copy()
-                cv2.rectangle(img_raw, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                try:
-                    msg_raw_pub = self._bridge.cv2_to_imgmsg(img_raw, encoding="bgr8")
-                    msg_raw_pub.header.stamp = msg_raw_header
-                    msg_raw_pub.header.frame_id = "camara_logitech_c270"
-                    self._pub.publish(msg_raw_pub)
-                except Exception: pass
+        # ══════════════════════════════════════════════════════════════════
+        # FASE 2: ANALIZANDO — delay asincrono por contador de frames
+        # ══════════════════════════════════════════════════════════════════
+        elif self._estado_actual == 'ANALIZANDO':
+            self._frames_analizando += 1
 
-                # Paso 2: Visor inferior — imagen de carga mientras se procesa
-                img_carga = np.zeros_like(frame)
-                cv2.putText(
-                    img_carga, "Analizando elemento...",
-                    (60, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 220, 255), 2,
-                    cv2.LINE_AA
+            # Visor superior: frame congelado con BBox
+            if self._frame_congelado is not None and self._bbox_congelado is not None:
+                bx = self._bbox_congelado
+                img_freeze = self._frame_congelado.copy()
+                cv2.rectangle(
+                    img_freeze,
+                    (int(bx["x1"]), int(bx["y1"])),
+                    (int(bx["x2"]), int(bx["y2"])),
+                    (0, 255, 0), 2
                 )
                 try:
-                    msg_carga = self._bridge.cv2_to_imgmsg(img_carga, encoding="bgr8")
-                    msg_carga.header.stamp = self.get_clock().now().to_msg()
-                    msg_carga.header.frame_id = "camara_logitech_c270"
-                    self._pub_video_segmentado.publish(msg_carga)
+                    msg_raw = self._bridge.cv2_to_imgmsg(img_freeze, encoding="bgr8")
+                    msg_raw.header.stamp = stamp
+                    msg_raw.header.frame_id = "camara_logitech_c270"
+                    self._pub.publish(msg_raw)
                 except Exception: pass
 
-                # Paso 3: Micro-delay no bloqueante via I/O de logger
-                self.get_logger().info("Analizando elemento — procesando mascara HSV...")
+            # Visor inferior: canvas de carga cyan
+            canvas_carga = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(
+                canvas_carga, "ANALIZANDO ELEMENTO...",
+                (55, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 220, 255), 2, cv2.LINE_AA
+            )
+            try:
+                msg_seg = self._bridge.cv2_to_imgmsg(canvas_carga, encoding="bgr8")
+                msg_seg.header.stamp = stamp
+                msg_seg.header.frame_id = "camara_logitech_c270"
+                self._pub_video_segmentado.publish(msg_seg)
+            except Exception: pass
 
-                # Paso 4: Procesar HSV y publicar resultado en visor inferior
-                canvas_seg, estado_limpieza = self._aplicar_segmentacion(frame.copy(), mejor_box)
-                try:
-                    msg_seg = self._bridge.cv2_to_imgmsg(canvas_seg, encoding="bgr8")
-                    msg_seg.header.stamp = self.get_clock().now().to_msg()
-                    msg_seg.header.frame_id = "camara_logitech_c270"
-                    self._pub_video_segmentado.publish(msg_seg)
-                except Exception: pass
+            # Transicion al estado ESPERA_RETIRO tras 15 frames (~0.5 s)
+            if self._frames_analizando >= 15:
+                bbox = self._bbox_congelado
+                canvas_hsv, estado_limpieza = self._aplicar_segmentacion(
+                    self._frame_congelado.copy(), bbox
+                )
+                self._canvas_veredicto = canvas_hsv
 
-                # Metadatos y veredicto
+                ancho = int(bbox["x2"]) - int(bbox["x1"])
+                alto  = int(bbox["y2"]) - int(bbox["y1"])
+                area  = ancho * alto
+                tamano_label = "GRANDE" if area > 33000 else "CHICO"
                 self._ultimo_veredicto = f"Elemento {tamano_label}: {estado_limpieza}"
 
                 msg_tam = Float32()
@@ -479,53 +509,100 @@ class NodoCamara(Node):
                 msg_str.data = self._ultimo_veredicto
                 self._pub_analisis.publish(msg_str)
 
-                # Transición de estado y comando al actuador
-                self._estado_actual = 'ESPERA_RETIRO'
-                self._frames_vacio = 0
-
                 msg_grados = Float32()
                 if estado_limpieza == "OPTIMO":
                     msg_grados.data = 90.0
-                    self.get_logger().info("Veredicto OPTIMO → Publicando 90.0 grados (aceptacion).")
+                    self.get_logger().info("Veredicto OPTIMO → 90.0 grados (aceptacion).")
                 else:
                     msg_grados.data = -90.0
-                    self.get_logger().info("Veredicto ANOMALIA → Publicando -90.0 grados (rechazo).")
+                    self.get_logger().info("Veredicto ANOMALIA → -90.0 grados (rechazo).")
                 self._pub_comando_grados.publish(msg_grados)
-                return
 
+                self._frames_vacio  = 0
+                self._estado_actual = 'ESPERA_RETIRO'
+                self.get_logger().info(
+                    f"Veredicto: {self._ultimo_veredicto}. Transicion a ESPERA_RETIRO."
+                )
+            return
+
+        # ══════════════════════════════════════════════════════════════════
+        # FASE 3: ESPERA_RETIRO — YOLO activo para confirmar retirada
+        # ══════════════════════════════════════════════════════════════════
         elif self._estado_actual == 'ESPERA_RETIRO':
-            if mejor_box is not None and mejor_conf >= 0.40:
+            detections = self._inferir(frame)
+            mejor_conf = 0.0
+            for d in detections:
+                if d["conf"] > mejor_conf:
+                    mejor_conf = d["conf"]
+
+            # Visor superior: frame congelado permanente
+            if self._frame_congelado is not None and self._bbox_congelado is not None:
+                bx = self._bbox_congelado
+                img_freeze = self._frame_congelado.copy()
+                cv2.rectangle(
+                    img_freeze,
+                    (int(bx["x1"]), int(bx["y1"])),
+                    (int(bx["x2"]), int(bx["y2"])),
+                    (0, 255, 0), 2
+                )
+                try:
+                    msg_raw = self._bridge.cv2_to_imgmsg(img_freeze, encoding="bgr8")
+                    msg_raw.header.stamp = stamp
+                    msg_raw.header.frame_id = "camara_logitech_c270"
+                    self._pub.publish(msg_raw)
+                except Exception: pass
+
+            # Visor inferior: canvas HSV del veredicto
+            if self._canvas_veredicto is not None:
+                try:
+                    msg_seg = self._bridge.cv2_to_imgmsg(self._canvas_veredicto, encoding="bgr8")
+                    msg_seg.header.stamp = stamp
+                    msg_seg.header.frame_id = "camara_logitech_c270"
+                    self._pub_video_segmentado.publish(msg_seg)
+                except Exception: pass
+
+            # Publicar veredicto en clasificacion
+            msg_str = String()
+            if "OPTIMO" in self._ultimo_veredicto:
+                msg_str.data = f"{self._ultimo_veredicto}\nEsperando retiro del elemento."
+            else:
+                msg_str.data = f"{self._ultimo_veredicto}\nPor favor, retire el elemento."
+
+            if mejor_conf >= 0.40:
                 self._frames_vacio = 0
-                msg_str = String()
-                if "OPTIMO" in self._ultimo_veredicto:
-                    msg_str.data = f"{self._ultimo_veredicto}\nProcesando... Esperando retiro del elemento."
-                else:
-                    msg_str.data = f"{self._ultimo_veredicto}\nPor favor, retire el elemento del sistema."
-                self._pub_analisis.publish(msg_str)
             else:
                 self._frames_vacio += 1
-                if self._frames_vacio >= 30:
-                    self._frames_botella = 0
-                    self._estado_actual = 'BUSQUEDA'
+            self._pub_analisis.publish(msg_str)
 
-                    # Retornar motor a posicion home (0.0 grados)
-                    msg_home = Float32()
-                    msg_home.data = 0.0
-                    self._pub_comando_grados.publish(msg_home)
-                    self.get_logger().info("Objeto retirado → Publicando 0.0 grados (retorno a home).")
+            # Transicion de vuelta a BUSQUEDA
+            if self._frames_vacio >= 30:
+                # Comando home al actuador
+                msg_home = Float32()
+                msg_home.data = 0.0
+                self._pub_comando_grados.publish(msg_home)
+                self.get_logger().info("Objeto retirado → 0.0 grados (home). Retorno a BUSQUEDA.")
 
-                    # Resetear solo el visor inferior con un canvas negro limpio
-                    frame_negro = np.zeros((480, 640, 3), dtype=np.uint8)
-                    try:
-                        msg_negro = self._bridge.cv2_to_imgmsg(frame_negro, encoding="bgr8")
-                        msg_negro.header.stamp = self.get_clock().now().to_msg()
-                        msg_negro.header.frame_id = "camara_logitech_c270"
-                        self._pub_video_segmentado.publish(msg_negro)
-                    except Exception: pass
+                # Resetear visor inferior con canvas negro
+                frame_negro = np.zeros((480, 640, 3), dtype=np.uint8)
+                try:
+                    msg_negro = self._bridge.cv2_to_imgmsg(frame_negro, encoding="bgr8")
+                    msg_negro.header.stamp = self.get_clock().now().to_msg()
+                    msg_negro.header.frame_id = "camara_logitech_c270"
+                    self._pub_video_segmentado.publish(msg_negro)
+                except Exception: pass
 
-                    msg_str = String()
-                    msg_str.data = "vacio"
-                    self._pub_analisis.publish(msg_str)
+                # Limpiar estado
+                self._frames_botella    = 0
+                self._frames_analizando = 0
+                self._frames_vacio      = 0
+                self._frame_congelado   = None
+                self._bbox_congelado    = None
+                self._canvas_veredicto  = None
+                self._estado_actual     = 'BUSQUEDA'
+
+                msg_str = String()
+                msg_str.data = "vacio"
+                self._pub_analisis.publish(msg_str)
             return
 
     def destroy_node(self) -> None:
