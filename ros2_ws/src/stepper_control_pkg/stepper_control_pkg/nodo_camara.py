@@ -129,6 +129,7 @@ class NodoCamara(Node):
         /camara/video_segmentado (sensor_msgs/Image): Mapa de anomalías HSV.
         /clasificacion_objeto (std_msgs/String): Veredicto de clasificación.
         /tamano_estimado (std_msgs/Float32): Área transversal estimada en cm².
+        /comando_grados (std_msgs/Float32): Ángulo de actuación (90.0 aceptación, -90.0 rechazo, 0.0 home).
 
     Parámetros YAML (nodo_camara):
         distancia_camara_cm (float): Distancia de referencia en cm. Default: 60.0.
@@ -141,7 +142,13 @@ class NodoCamara(Node):
     """
 
     def __init__(self) -> None:
-        """Inicializa publishers, parámetros YAML, modelo NCNN y hilo de captura."""
+        """Inicializa publishers, parámetros YAML, modelo NCNN y hilo de captura.
+
+        Publishers creados:
+            - /camara/video_raw, /camara/video_segmentado, /camara/foto_anotada
+            - /clasificacion_objeto, /tamano_estimado
+            - /comando_grados: control del mecanismo de actuación físico.
+        """
         super().__init__("nodo_camara")
         self._bridge  = CvBridge()
         self._pub     = self.create_publisher(Image, "/camara/video_raw", QOS_VIDEO)
@@ -149,6 +156,7 @@ class NodoCamara(Node):
         self._pub_tamano = self.create_publisher(Float32, "/tamano_estimado", 10)
         self._pub_video_segmentado = self.create_publisher(Image, "/camara/video_segmentado", QOS_VIDEO)
         self._pub_foto_anotada = self.create_publisher(Image, "/camara/foto_anotada", QOS_VIDEO)
+        self._pub_comando_grados = self.create_publisher(Float32, "/comando_grados", 10)
         
         self._estado_actual = 'BUSQUEDA'
         self._frames_botella = 0
@@ -411,7 +419,8 @@ class NodoCamara(Node):
                 img_raw = frame.copy()
                 img_seg, estado_limpieza = self._aplicar_segmentacion(frame.copy(), mejor_box)
                 
-                self._ultimo_veredicto = f"Target {resultado.upper()} {estado_limpieza}"
+                tamano_label = "GRANDE" if resultado == "grande" else "CHICO"
+                self._ultimo_veredicto = f"Elemento {tamano_label}: {estado_limpieza}"
 
                 cv2.rectangle(img_raw, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.putText(img_raw, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
@@ -443,6 +452,16 @@ class NodoCamara(Node):
 
                 self._estado_actual = 'ESPERA_RETIRO'
                 self._frames_vacio = 0
+
+                # Accionar mecanismo segun el veredicto de vision
+                msg_grados = Float32()
+                if estado_limpieza == "OPTIMO":
+                    msg_grados.data = 90.0
+                    self.get_logger().info("Veredicto OPTIMO → Publicando 90.0 grados (aceptacion).")
+                else:
+                    msg_grados.data = -90.0
+                    self.get_logger().info("Veredicto ANOMALIA → Publicando -90.0 grados (rechazo).")
+                self._pub_comando_grados.publish(msg_grados)
                 return
 
         elif self._estado_actual == 'ESPERA_RETIRO':
@@ -459,7 +478,13 @@ class NodoCamara(Node):
                 if self._frames_vacio >= 30:
                     self._frames_botella = 0
                     self._estado_actual = 'BUSQUEDA'
-                    
+
+                    # Retornar motor a posicion home (0.0 grados)
+                    msg_home = Float32()
+                    msg_home.data = 0.0
+                    self._pub_comando_grados.publish(msg_home)
+                    self.get_logger().info("Objeto retirado → Publicando 0.0 grados (retorno a home).")
+
                     # Limpiar visores con imagen negra
                     frame_negro = np.zeros((480, 640, 3), dtype=np.uint8)
                     try:
@@ -469,7 +494,7 @@ class NodoCamara(Node):
                         self._pub_video_segmentado.publish(msg_negro)
                         self._pub.publish(msg_negro)
                     except Exception: pass
-                    
+
                     msg_str = String()
                     msg_str.data = "vacio"
                     self._pub_analisis.publish(msg_str)
