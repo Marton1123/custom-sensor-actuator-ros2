@@ -13,7 +13,6 @@ import math
 
 import rclpy
 from rclpy.node import Node
-from ament_index_python.packages import get_package_share_directory
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import String, Float32, Bool
@@ -73,7 +72,7 @@ class NodoVision(Node):
         super().__init__('nodo_vision')
 
         # Declarar parámetros
-        ruta_modelo = os.path.join(get_package_share_directory('ros2_vision_pkg'), 'models', 'botellas_vs_latas_ncnn')
+        ruta_modelo = os.path.expanduser('~/custom-sensor-actuator-ros2/IA/models/botellas_vs_latas_ncnn')
         self.declare_parameter('modelo_dir', ruta_modelo)
         self.declare_parameter('conf_threshold', 0.45) # Bajado a 0.45 para latas
         self.declare_parameter('iou_threshold', 0.45)
