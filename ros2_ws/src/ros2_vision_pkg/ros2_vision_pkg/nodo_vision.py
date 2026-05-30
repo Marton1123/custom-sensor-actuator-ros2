@@ -465,7 +465,7 @@ class NodoVision(Node):
             
             out_estado = self._ultimo_veredicto
 
-            if self._frames_vacio >= 30:
+            if self._frames_vacio >= 10:
                 self._estado_actual = 'RESETEO'
 
         elif self._estado_actual == 'RESETEO':
