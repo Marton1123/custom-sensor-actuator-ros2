@@ -1,27 +1,25 @@
 #!/usr/bin/env python3
 """
-01_download_and_prepare.py
-==========================
-Paso 1 del pipeline: descarga las imágenes de COCO que contienen botellas
-(clase 39) usando FiftyOne, toma una muestra de 6000 imágenes (4800 train /
-1200 val) y las convierte al formato YOLO normalizado.
+01_download_and_prepare.py  (v2 — bottle vs can, 2 clases)
+===========================================================
+Paso 1 del pipeline: agrega latas (Open Images V7) al dataset de
+botellas COCO ya descargado, y re-splitea todo a 80/20.
 
-Estructura de salida:
+Estrategia:
+    - Bottles : reutiliza data/raw/ existente (COCO, clase 0) — SIN borrar
+    - Latas   : descarga ~3000 imgs de Open Images V7  (clase 1)
+    - Mezcla  : barajea con seed fijo → ~4800 train / ~1200 val
+
+Estructura de salida (sobreescribe data/raw/ solo al final):
     data/
     └── raw/
-        ├── images/
-        │   ├── train/   ← 4800 imágenes .jpg
-        │   └── val/     ← 1200 imágenes .jpg
-        ├── labels/
-        │   ├── train/   ← 4800 archivos .txt (formato YOLO)
-        │   └── val/     ← 1200 archivos .txt
-        └── data.yaml    ← config para Ultralytics
+        ├── images/  train/ val/
+        ├── labels/  train/ val/
+        └── data.yaml   ← nc: 2  (0=bottle, 1=can)
 
 Uso:
     conda activate botellas
     python scripts/01_download_and_prepare.py
-
-Tiempo estimado: 10–25 min según conexión (~2–3 GB de descarga).
 """
 
 import random
@@ -32,205 +30,337 @@ import fiftyone as fo
 import fiftyone.zoo as foz
 
 # ─── Configuración ────────────────────────────────────────────────────────────
-COCO_CLASS    = "bottle"
-YOLO_CLASS_ID = 0           # remap clase 39 → 0 (única clase del modelo)
+YOLO_ID_BOTTLE = 0
+YOLO_ID_CAN    = 1
 
-N_TRAIN = 4800
-N_VAL   = 1200
-SEED    = 42
+N_CAN_DOWNLOAD = 3000   # latas a descargar de Open Images
+TRAIN_RATIO    = 0.80
+SEED           = 42
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 RAW_DIR  = BASE_DIR / "data" / "raw"
 ZOO_DIR  = BASE_DIR / "data" / "_fiftyone_zoo"
+
+# Directorios actuales de bottles (COCO ya descargado)
+BOTTLE_IMG_TRAIN = RAW_DIR / "images" / "train"
+BOTTLE_IMG_VAL   = RAW_DIR / "images" / "val"
+BOTTLE_LBL_TRAIN = RAW_DIR / "labels" / "train"
+BOTTLE_LBL_VAL   = RAW_DIR / "labels" / "val"
+
+# Staging temporal para latas (se elimina al final)
+STAGE_DIR    = BASE_DIR / "data" / "_staging"
+CAN_IMG_DIR  = STAGE_DIR / "images"
+CAN_LBL_DIR  = STAGE_DIR / "labels"
 # ──────────────────────────────────────────────────────────────────────────────
 
 random.seed(SEED)
 
 
-def load_split(split: str, max_samples: int) -> fo.Dataset:
+# ─── 1. Verificar bottles existentes ─────────────────────────────────────────
+
+def check_existing_bottles() -> tuple[list[Path], list[Path]]:
     """
-    Carga desde FiftyOne Zoo solo las imágenes de COCO que contienen
-    botellas. Si ya están en caché local, no vuelve a descargar.
+    Lee los pares (imagen, etiqueta) ya existentes de COCO bottles.
+    Las etiquetas ya tienen clase 0 — no se modifican.
     """
-    print(f"\n[INFO] Cargando split '{split}' (máx. {max_samples} imgs con botellas)...")
+    print("\n[INFO] Verificando dataset de bottles existente (COCO)...")
 
-    # Configurar directorio de caché ANTES de llamar al zoo
-    # (evita el conflicto 'multiple values for dataset_dir' en FiftyOne >= 0.23)
-    fo.config.dataset_zoo_dir = str(ZOO_DIR)
+    pairs: list[tuple[Path, Path]] = []
+    for img_dir, lbl_dir in [
+        (BOTTLE_IMG_TRAIN, BOTTLE_LBL_TRAIN),
+        (BOTTLE_IMG_VAL,   BOTTLE_LBL_VAL),
+    ]:
+        for img in sorted(img_dir.glob("*.jpg")):
+            lbl = lbl_dir / img.with_suffix(".txt").name
+            if lbl.exists():
+                pairs.append((img, lbl))
 
-    dataset_name = f"coco_bottles_{split}"
-
-    if fo.dataset_exists(dataset_name):
-        print(f"[INFO] Dataset '{dataset_name}' ya en caché, cargando...")
-        return fo.load_dataset(dataset_name)
-
-    dataset = foz.load_zoo_dataset(
-        "coco-2017",
-        split=split,
-        label_types=["detections"],
-        classes=[COCO_CLASS],
-        only_matching=True,
-        max_samples=max_samples,
-        dataset_name=dataset_name,
-        seed=SEED,
+    assert len(pairs) > 0, (
+        f"No se encontraron bottles en {RAW_DIR}.\n"
+        "Verifica que data/raw/images/ y data/raw/labels/ existan."
     )
-    print(f"[INFO] Imágenes cargadas en '{split}': {len(dataset)}")
-    return dataset
+
+    imgs = [p[0] for p in pairs]
+    lbls = [p[1] for p in pairs]
+    print(f"[INFO] Bottles encontradas: {len(imgs)} pares imagen/etiqueta (clase 0)")
+    return imgs, lbls
 
 
-def export_to_yolo(dataset: fo.Dataset, split_name: str) -> tuple[int, int]:
+# ─── 2. Descargar latas de Open Images V7 ────────────────────────────────────
+
+def download_cans() -> tuple[list[Path], list[Path]]:
     """
-    Copia imágenes y genera etiquetas YOLO normalizadas en data/raw/.
-    Devuelve (exportadas, omitidas).
+    Descarga imágenes de 'Tin can' desde Open Images V7 via FiftyOne.
+    Exporta a STAGE_DIR con clase YOLO 1.
     """
-    img_out = RAW_DIR / "images" / split_name
-    lbl_out = RAW_DIR / "labels" / split_name
-    img_out.mkdir(parents=True, exist_ok=True)
-    lbl_out.mkdir(parents=True, exist_ok=True)
+    print(f"\n[INFO] Descargando ~{N_CAN_DOWNLOAD} imágenes de latas (Open Images V7)...")
 
-    exported = 0
-    skipped  = 0
+    fo.config.dataset_zoo_dir = str(ZOO_DIR)
+    CAN_IMG_DIR.mkdir(parents=True, exist_ok=True)
+    CAN_LBL_DIR.mkdir(parents=True, exist_ok=True)
+
+    n_train_dl = int(N_CAN_DOWNLOAD * 0.85)
+    n_val_dl   = N_CAN_DOWNLOAD - n_train_dl
+
+    all_can_imgs: list[Path] = []
+    all_can_lbls: list[Path] = []
+
+    for split, n_split in [("train", n_train_dl), ("validation", n_val_dl)]:
+        ds_name = f"openimages_cans_{split}"
+
+        if fo.dataset_exists(ds_name):
+            print(f"[INFO] Dataset '{ds_name}' ya en caché, cargando...")
+            ds = fo.load_dataset(ds_name)
+        else:
+            ds = foz.load_zoo_dataset(
+                "open-images-v7",
+                split=split,
+                label_types=["detections"],
+                classes=["Tin can"],
+                only_matching=True,
+                max_samples=n_split,
+                dataset_name=ds_name,
+                seed=SEED,
+            )
+        print(f"[INFO] Open Images '{split}': {len(ds)} imágenes descargadas")
+
+        # Verificar el nombre exacto de la clase en este dataset
+        labels_found = ds.distinct("ground_truth.detections.label")
+        print(f"[DEBUG] Etiquetas en '{split}': {labels_found[:10]}")
+
+        # Buscar la variante correcta de "tin can" (case-insensitive)
+        can_label = next(
+            (l for l in labels_found if l.lower() == "tin can"),
+            None
+        )
+        if can_label is None:
+            print(f"[WARN] No se encontró 'Tin can' en '{split}'. "
+                  f"Etiquetas disponibles: {labels_found[:10]}")
+            continue
+
+        if can_label != "Tin can":
+            print(f"[INFO] Usando etiqueta '{can_label}' en lugar de 'Tin can'")
+
+        imgs, lbls, skipped = _export_cans_to_yolo(ds, can_label)
+        all_can_imgs.extend(imgs)
+        all_can_lbls.extend(lbls)
+
+        if skipped:
+            print(f"[WARN] Omitidas en '{split}': {skipped}")
+
+    assert len(all_can_imgs) > 0, (
+        "No se exportaron latas. Revisa la conexión o el nombre de clase en Open Images."
+    )
+    print(f"[INFO] Total latas exportadas: {len(all_can_imgs)}")
+    return all_can_imgs, all_can_lbls
+
+
+def _export_cans_to_yolo(
+    dataset: fo.Dataset,
+    can_label: str,
+) -> tuple[list[Path], list[Path], int]:
+    """
+    Copia imágenes y genera etiquetas YOLO (clase 1) en STAGE_DIR.
+    FiftyOne bbox: [x_min_rel, y_min_rel, w_rel, h_rel]
+    YOLO bbox:     [x_center_rel, y_center_rel, w_rel, h_rel]
+    Retorna (imgs_exportadas, lbls_exportadas, n_omitidas).
+    """
+    imgs_out: list[Path] = []
+    lbls_out: list[Path] = []
+    skipped = 0
 
     for sample in dataset:
         if sample.ground_truth is None:
             skipped += 1
             continue
 
-        bottle_dets = [
+        can_dets = [
             d for d in sample.ground_truth.detections
-            if d.label == COCO_CLASS
+            if d.label == can_label
         ]
-        if not bottle_dets:
+        if not can_dets:
             skipped += 1
             continue
 
         src = Path(sample.filepath)
-        dst = img_out / src.name
-        if not dst.exists():
-            shutil.copy2(src, dst)
+        # Prefijo "can_" para evitar colisiones de nombre con bottles
+        dst_name = "can_" + src.name
+        dst_img  = CAN_IMG_DIR / dst_name
 
-        # FiftyOne bbox: [x_min_rel, y_min_rel, w_rel, h_rel]
-        # YOLO bbox:     [x_center_rel, y_center_rel, w_rel, h_rel]
+        if not dst_img.exists():
+            shutil.copy2(src, dst_img)
+
         lines = []
-        for det in bottle_dets:
+        for det in can_dets:
             x, y, w, h = det.bounding_box
             x_center = max(0.0, min(1.0, x + w / 2.0))
             y_center = max(0.0, min(1.0, y + h / 2.0))
             w        = max(0.001, min(1.0, w))
             h        = max(0.001, min(1.0, h))
             lines.append(
-                f"{YOLO_CLASS_ID} {x_center:.6f} {y_center:.6f} {w:.6f} {h:.6f}"
+                f"{YOLO_ID_CAN} {x_center:.6f} {y_center:.6f} {w:.6f} {h:.6f}"
             )
 
-        lbl_file = lbl_out / src.with_suffix(".txt").name
+        lbl_file = CAN_LBL_DIR / Path(dst_name).with_suffix(".txt").name
         lbl_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        exported += 1
 
-    return exported, skipped
+        imgs_out.append(dst_img)
+        lbls_out.append(lbl_file)
+
+    return imgs_out, lbls_out, skipped
 
 
-def compensate_val(ds_train: fo.Dataset, ds_val: fo.Dataset) -> tuple[fo.Dataset, fo.Dataset]:
+# ─── 3. Mezclar y re-splitear ─────────────────────────────────────────────────
+
+def merge_and_split(
+    bottle_imgs: list[Path], bottle_lbls: list[Path],
+    can_imgs:    list[Path], can_lbls:    list[Path],
+) -> tuple[int, int]:
     """
-    Si val tiene menos de N_VAL muestras, toma el déficit de train.
-    Usa una vista filtrada en vez de merge para evitar errores de la API.
+    Mezcla bottles y latas, barajea y re-splitea 80/20.
+    Sobreescribe data/raw/ SOLO al final, cuando todos los archivos
+    están listos en staging, para no perder el dataset original si
+    el script falla a mitad.
     """
-    real_val = len(ds_val)
-    if real_val >= N_VAL:
-        return ds_train, ds_val
+    print("\n[INFO] Mezclando y re-spliteando dataset...")
 
-    deficit = N_VAL - real_val
-    print(f"\n[WARN] val solo tiene {real_val} imgs con botellas en COCO.")
-    print(f"       Se usarán {deficit} imágenes extras de train para completar {N_VAL}.")
+    all_imgs = bottle_imgs + can_imgs
+    all_lbls = bottle_lbls + can_lbls
 
-    all_train_ids = ds_train.values("id")
-    random.shuffle(all_train_ids)
-    extra_ids = all_train_ids[:deficit]
-    remaining_ids = all_train_ids[deficit:]
+    combined = list(zip(all_imgs, all_lbls))
+    assert len(combined) > 0, "No hay imágenes para mezclar. Verifica los pasos anteriores."
 
-    # Exportar el bloque extra directamente como si fuera val
-    # (no mezclamos datasets, trabajamos con vistas)
-    ds_extra    = ds_train.select(extra_ids)
-    ds_train_v2 = ds_train.select(remaining_ids)
+    random.shuffle(combined)
+    all_imgs_s, all_lbls_s = zip(*combined)
 
-    print(f"[INFO] Tras ajuste → train: {len(ds_train_v2)}, val efectivo: {real_val + len(ds_extra)}")
-    return ds_train_v2, ds_val, ds_extra   # type: ignore[return-value]
+    n_total = len(all_imgs_s)
+    n_train = int(n_total * TRAIN_RATIO)
+    n_val   = n_total - n_train
+    print(f"[INFO] Total: {n_total} | Train: {n_train} | Val: {n_val}")
 
+    # Preparar en staging antes de tocar data/raw/
+    out_stage = STAGE_DIR / "final"
+    splits = {
+        "train": (list(all_imgs_s[:n_train]), list(all_lbls_s[:n_train])),
+        "val":   (list(all_imgs_s[n_train:]), list(all_lbls_s[n_train:])),
+    }
+
+    for split_name, (imgs, lbls) in splits.items():
+        img_out = out_stage / "images" / split_name
+        lbl_out = out_stage / "labels" / split_name
+        img_out.mkdir(parents=True, exist_ok=True)
+        lbl_out.mkdir(parents=True, exist_ok=True)
+        for img, lbl in zip(imgs, lbls):
+            shutil.copy2(img, img_out / img.name)
+            shutil.copy2(lbl, lbl_out / lbl.name)
+
+    print("[INFO] Staging listo. Reemplazando data/raw/...")
+
+    # Solo aquí se toca data/raw/ — staging completado con éxito
+    for split_name in ["train", "val"]:
+        for kind in ["images", "labels"]:
+            dst = RAW_DIR / kind / split_name
+            src = out_stage / kind / split_name
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
+
+    _print_class_balance("train", RAW_DIR / "labels" / "train")
+    _print_class_balance("val",   RAW_DIR / "labels" / "val")
+
+    return n_train, n_val
+
+
+def _print_class_balance(split: str, lbl_dir: Path) -> None:
+    counts: dict[int, int] = {}
+    for lbl in lbl_dir.glob("*.txt"):
+        for line in lbl.read_text().splitlines():
+            parts = line.strip().split()
+            if parts:
+                cls = int(parts[0])
+                counts[cls] = counts.get(cls, 0) + 1
+    total = sum(counts.values())
+    b = counts.get(0, 0)
+    c = counts.get(1, 0)
+    print(
+        f"[INFO] Balance {split}: "
+        f"bottle={b} ({b/max(total,1)*100:.1f}%) | "
+        f"can={c} ({c/max(total,1)*100:.1f}%)"
+    )
+
+
+# ─── 4. data.yaml ─────────────────────────────────────────────────────────────
 
 def write_data_yaml(n_train: int, n_val: int) -> None:
     yaml_text = f"""\
-# ── Dataset: COCO Bottles (1 clase) ──────────────────────────
-# Generado por 01_download_and_prepare.py
+# ── Dataset: Bottle vs Can (2 clases) ────────────────────────
+# Generado por 01_download_and_prepare.py  (v2)
 # train: {n_train} imágenes  |  val: {n_val} imágenes
+# Fuentes: COCO 2017 (bottles) + Open Images V7 (cans)
 
 path: {RAW_DIR.resolve()}
 train: images/train
 val:   images/val
 
-nc: 1
+nc: 2
 names:
   0: bottle
+  1: can
 """
     out = RAW_DIR / "data.yaml"
     out.write_text(yaml_text, encoding="utf-8")
-    print(f"\n[INFO] data.yaml escrito en: {out}")
+    print(f"[INFO] data.yaml escrito en: {out}")
 
 
-def print_summary(n_train: int, n_val: int) -> None:
-    print("\n" + "=" * 55)
-    print("  ✅  Pipeline Paso 1 completado")
-    print("=" * 55)
-    print(f"  Train : {n_train:>5} imágenes  →  data/raw/images/train/")
-    print(f"  Val   : {n_val:>5} imágenes  →  data/raw/images/val/")
-    print(f"  Labels: formato YOLO normalizado  (clase 0 = bottle)")
-    print(f"  YAML  : data/raw/data.yaml")
-    print("=" * 55)
-    print("\n  Siguiente paso:")
-    print("  python scripts/02_train.py")
+# ─── 5. Limpieza ──────────────────────────────────────────────────────────────
 
+def cleanup(delete_fo_datasets: bool = True) -> None:
+    if STAGE_DIR.exists():
+        shutil.rmtree(STAGE_DIR)
+        print(f"[INFO] Staging eliminado: {STAGE_DIR}")
+
+    if delete_fo_datasets:
+        for ds_name in ["openimages_cans_train", "openimages_cans_validation"]:
+            if fo.dataset_exists(ds_name):
+                fo.load_dataset(ds_name).delete()
+                print(f"[INFO] Dataset FiftyOne '{ds_name}' eliminado de memoria")
+
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    print("=" * 55)
-    print("  Pipeline Paso 1 — Descarga y preparación COCO Bottles")
-    print("=" * 55)
+    print("=" * 58)
+    print("  Pipeline Paso 1 v2 — Bottle vs Can (2 clases)")
+    print("=" * 58)
 
-    # ── 1. Descargar desde FiftyOne Zoo ───────────────────────────────────────
-    ds_train = load_split("train", max_samples=N_TRAIN)
-    ds_val   = load_split("validation", max_samples=N_VAL)
+    # 1. Leer bottles ya existentes (COCO, no se redescargan)
+    bottle_imgs, bottle_lbls = check_existing_bottles()
 
-    # ── 2. Compensar val si COCO no tiene suficientes imágenes ───────────────
-    result = compensate_val(ds_train, ds_val)
-    if len(result) == 3:
-        ds_train, ds_val, ds_extra = result
-        has_extra = True
-    else:
-        ds_train, ds_val = result
-        ds_extra  = None
-        has_extra = False
+    # 2. Descargar latas desde Open Images V7
+    can_imgs, can_lbls = download_cans()
 
-    # ── 3. Exportar a formato YOLO ────────────────────────────────────────────
-    print(f"\n[INFO] Exportando train ({len(ds_train)} imgs)...")
-    exp_train, skip_train = export_to_yolo(ds_train, "train")
+    # 3. Mezclar, barajear y re-splitear — data/raw/ se toca solo al final
+    n_train, n_val = merge_and_split(
+        bottle_imgs, bottle_lbls,
+        can_imgs,    can_lbls,
+    )
 
-    print(f"[INFO] Exportando val ({len(ds_val)} imgs)...")
-    exp_val, skip_val = export_to_yolo(ds_val, "val")
+    # 4. Escribir data.yaml con nc=2
+    write_data_yaml(n_train, n_val)
 
-    # Exportar el bloque extra (de train) como val adicional
-    if has_extra:
-        print(f"[INFO] Exportando val extra ({len(ds_extra)} imgs desde train)...")
-        exp_extra, _ = export_to_yolo(ds_extra, "val")
-        exp_val += exp_extra
+    # 5. Limpiar staging y datasets FiftyOne temporales
+    cleanup()
 
-    if skip_train or skip_val:
-        print(f"[WARN] Omitidas — train: {skip_train}, val: {skip_val}")
-
-    # ── 4. data.yaml ──────────────────────────────────────────────────────────
-    write_data_yaml(exp_train, exp_val)
-
-    # ── 5. Limpiar de memoria ─────────────────────────────────────────────────
-    fo.load_dataset(f"coco_bottles_train").delete()
-    fo.load_dataset(f"coco_bottles_validation").delete()
-
-    print_summary(exp_train, exp_val)
+    print("\n" + "=" * 58)
+    print("  ✅  Pipeline Paso 1 v2 completado")
+    print("=" * 58)
+    print(f"  Train : {n_train:>5} imágenes  →  data/raw/images/train/")
+    print(f"  Val   : {n_val:>5} imágenes  →  data/raw/images/val/")
+    print(f"  Clases: 0 = bottle  |  1 = can")
+    print(f"  YAML  : data/raw/data.yaml")
+    print("=" * 58)
+    print("\n  Siguiente paso:")
+    print("  python scripts/02_train.py")
 
 
 if __name__ == "__main__":
