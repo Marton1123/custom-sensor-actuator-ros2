@@ -101,10 +101,14 @@ class NodoVision(Node):
         self._id_congelado = None
         self._box_congelado = None
         self._ultimo_veredicto = "vacio"
+        self._lost_frames = 0
+        self._last_best_obj = None
+        self._last_best_box = None
+        self._last_best_score = 0.0
         
         # Pre-allocate canvas
         self._canvas_espera = np.zeros((480, 640, 3), dtype=np.uint8)
-        cv2.putText(self._canvas_espera, 'ESPERANDO ELEMENTO...', (120, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+        cv2.putText(self._canvas_espera, 'ESPERANDO OBJETO PARA ANALIZAR', (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
         self._canvas_analizando = np.zeros((480, 640, 3), dtype=np.uint8)
         
         # NCNN init
@@ -352,16 +356,28 @@ class NodoVision(Node):
         # ---------------- FSM ----------------
         if self._estado_actual == 'BUSQUEDA':
             run_inference()
+            out_estado = "vacio"
+            
             if best_obj in ["bottle", "can"]:
                 self._frames_botella += 1
+                self._lost_frames = 0
+                self._last_best_obj = best_obj
+                self._last_best_box = best_box
+                self._last_best_score = best_score
+            elif hasattr(self, '_lost_frames') and self._lost_frames < 5 and self._last_best_obj is not None:
+                self._lost_frames += 1
+                best_obj = self._last_best_obj
+                best_box = self._last_best_box
+                best_score = self._last_best_score
+            else:
+                self._frames_botella = 0
+                self._last_best_obj = None
+            
+            if best_obj in ["bottle", "can"]:
                 out_raw = img.copy()
                 bx1, by1, bx2, by2 = map(int, best_box)
                 cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (0, 255, 0), 2)
                 cv2.putText(out_raw, f"{best_obj.upper()} {best_score:.2f}", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                out_estado = "analizando"
-            else:
-                self._frames_botella = 0
-                out_estado = "vacio"
             
             if self._frames_botella >= 15:
                 self._frame_congelado = img.copy()
@@ -369,6 +385,7 @@ class NodoVision(Node):
                 self._box_congelado = best_box
                 self._estado_actual = 'ANALIZANDO'
                 self._frames_analizando = 0
+                self._ultimo_veredicto = "analizando"
                 out_estado = "analizando"
 
         elif self._estado_actual == 'ANALIZANDO':
@@ -381,7 +398,7 @@ class NodoVision(Node):
             cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (0, 255, 255), 2)
             
             out_seg = self._canvas_analizando.copy()
-            cv2.putText(out_seg, f"ANALIZANDO {clase_str}...", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(out_seg, f"ANALIZANDO {clase_str}...", (160, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
             out_estado = "analizando"
 
             if self._frames_analizando >= 15:
@@ -416,8 +433,7 @@ class NodoVision(Node):
                 out_seg = seg_img
             else:
                 out_seg = np.zeros((480, 640, 3), dtype=np.uint8)
-                out_seg[:] = (100, 0, 0)
-                cv2.putText(out_seg, 'LATA ACEPTADA', (140, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
+                cv2.putText(out_seg, 'LATA ACEPTADA', (180, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
             
             out_raw = img.copy()
             bx1, by1, bx2, by2 = map(int, self._box_congelado)
@@ -433,6 +449,7 @@ class NodoVision(Node):
         elif self._estado_actual == 'RESETEO':
             self._estado_actual = 'BUSQUEDA'
             self._frames_botella = 0
+            self._last_best_obj = None
             out_estado = "vacio"
             msg_grados = Float32()
             msg_grados.data = 0.0

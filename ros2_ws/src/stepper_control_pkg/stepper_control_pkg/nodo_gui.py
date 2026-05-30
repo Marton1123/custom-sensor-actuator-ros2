@@ -289,8 +289,6 @@ class VentanaPrincipal(QMainWindow):
         if self._ultimo_estado == "vacio":
             self.lbl_banner.setText("ESPERANDO ELEMENTO... COLOQUE EL OBJETO EN EL SISTEMA.")
             self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
-            self.lbl_camara_seg.clear()
-            self.lbl_camara_seg.setText("[ VIDEO SEGMENTADO ]")
         elif self._ultimo_estado == "analizando":
             self.lbl_banner.setText("ESTABILIZANDO... POR FAVOR RETIRE LA MANO.")
             self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
