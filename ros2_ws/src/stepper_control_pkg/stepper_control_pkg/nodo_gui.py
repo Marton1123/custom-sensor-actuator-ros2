@@ -105,6 +105,11 @@ class NodoGUI(Node):
         self.create_subscription(Float32, "/tamano_estimado", self._cb_area, 10)
         self.create_subscription(String, "/clasificacion_objeto", self._cb_estado, 10)
 
+        # Buffer y Timer para Throttle de Video a 15 FPS
+        self._pending_raw = None
+        self._pending_seg = None
+        self.create_timer(1.0 / 15.0, self._flush_frames)
+
         self.get_logger().info("NodoGUI (Dashboard) iniciado de forma pasiva.")
 
     def registrar_callbacks(self, fn_raw, fn_seg, fn_peso, fn_area, fn_estado):
@@ -116,18 +121,25 @@ class NodoGUI(Node):
             self._fn_estado = fn_estado
 
     def _cb_camara_raw(self, msg: Image) -> None:
-        with self._fn_lock:
-            fn = self._fn_frame_raw
-        if fn:
-            img = self._msg_to_qimage(msg)
-            if img: fn(img)
+        self._pending_raw = msg
 
     def _cb_camara_seg(self, msg: Image) -> None:
+        self._pending_seg = msg
+
+    def _flush_frames(self) -> None:
         with self._fn_lock:
-            fn = self._fn_frame_seg
-        if fn:
-            img = self._msg_to_qimage(msg)
-            if img: fn(img)
+            fn_raw = self._fn_frame_raw
+            fn_seg = self._fn_frame_seg
+        
+        if fn_raw and self._pending_raw:
+            img = self._msg_to_qimage(self._pending_raw)
+            if img: fn_raw(img)
+            self._pending_raw = None
+            
+        if fn_seg and self._pending_seg:
+            img = self._msg_to_qimage(self._pending_seg)
+            if img: fn_seg(img)
+            self._pending_seg = None
 
     def _cb_peso(self, msg: Float32) -> None:
         with self._fn_lock:
@@ -146,9 +158,8 @@ class NodoGUI(Node):
 
     def _msg_to_qimage(self, msg: Image) -> QImage:
         try:
-            frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding="rgb8")
-            h, w, ch = frame.shape
-            return QImage(frame.tobytes(), w, h, ch * w, QImage.Format.Format_RGB888)
+            # Conversion directa desde el buffer RGB8, evita CvBridge y Numpy copies redundantes
+            return QImage(msg.data, msg.width, msg.height, msg.step, QImage.Format.Format_RGB888).copy()
         except Exception as exc:
             self.get_logger().warn(f"Error procesando frame: {exc}", once=True)
             return None
@@ -199,8 +210,6 @@ class VentanaPrincipal(QMainWindow):
             self.senal_area.emit,
             self.senal_estado.emit
         )
-
-        self.showFullScreen()
 
         self.showFullScreen()
 

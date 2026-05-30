@@ -107,6 +107,7 @@ class NodoVision(Node):
         self._last_best_obj = None
         self._last_best_box = None
         self._last_best_score = 0.0
+        self._ultimo_estado_publicado = ""
         
         # Hilo de inferencia
         self._inference_lock = threading.Lock()
@@ -479,23 +480,25 @@ class NodoVision(Node):
         # ----------------------------------------------------
         # SPoP - Single Point of Publication
         # ----------------------------------------------------
-        out_raw_c = np.ascontiguousarray(out_raw)
-        out_seg_c = np.ascontiguousarray(out_seg)
+        out_raw_rgb = cv2.cvtColor(out_raw, cv2.COLOR_BGR2RGB)
+        out_seg_rgb = cv2.cvtColor(out_seg, cv2.COLOR_BGR2RGB)
 
-        msg_raw = self.bridge.cv2_to_imgmsg(out_raw_c, encoding="bgr8")
+        msg_raw = self.bridge.cv2_to_imgmsg(out_raw_rgb, encoding="rgb8")
         msg_raw.header.stamp = msg.header.stamp
         msg_raw.header.frame_id = "nodo_vision_procesado_raw"
         
-        msg_seg = self.bridge.cv2_to_imgmsg(out_seg_c, encoding="bgr8")
+        msg_seg = self.bridge.cv2_to_imgmsg(out_seg_rgb, encoding="rgb8")
         msg_seg.header.stamp = msg.header.stamp
         msg_seg.header.frame_id = "nodo_vision_procesado_seg"
 
         self.pub_raw.publish(msg_raw)
         self.pub_seg.publish(msg_seg)
 
-        msg_obj = String()
-        msg_obj.data = out_estado
-        self.pub_clasificacion.publish(msg_obj)
+        if out_estado != self._ultimo_estado_publicado:
+            msg_obj = String()
+            msg_obj.data = out_estado
+            self.pub_clasificacion.publish(msg_obj)
+            self._ultimo_estado_publicado = out_estado
         
         msg_tam = Float32()
         msg_tam.data = out_area
