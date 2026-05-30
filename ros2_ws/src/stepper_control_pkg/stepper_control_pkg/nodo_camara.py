@@ -79,28 +79,30 @@ class NodoCamara(Node):
 
     def _abrir_camara(self) -> cv2.VideoCapture:
         """Intenta abrir la camara iterando sobre puertos 0-5 para evitar nodos de metadatos V4L2."""
+        import time
         for i in range(6):
             cap = cv2.VideoCapture(i)
             if cap.isOpened():
-                ret, frame = cap.read()
-                if ret and frame is not None:
-                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                    self._fallos_consecutivos = 0
-                    
-                    real_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-                    real_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-                    self.get_logger().info(f"Cámara conectada exitosamente en el puerto /dev/video{i}")
-                    self.device_index = i
-                    return cap
-                else:
-                    cap.release()
+                for _ in range(3):  # Give the camera a moment to warm up
+                    ret, frame = cap.read()
+                    if ret and frame is not None:
+                        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        self._fallos_consecutivos = 0
+                        
+                        real_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+                        real_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                        self.get_logger().info(f"Cámara conectada exitosamente en el puerto /dev/video{i} ({int(real_w)}x{int(real_h)})")
+                        self.device_index = i
+                        return cap
+                    time.sleep(0.1)
+                cap.release()
             else:
                 cap.release()
                 
         self.get_logger().error("No se encontró ninguna cámara de captura de video válida en los puertos 0-5")
-        return cv2.VideoCapture(-1)
+        return None
 
     def _reconectar_camara(self) -> None:
         """Cierra el handle actual y reabre usando _abrir_camara()."""

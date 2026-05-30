@@ -72,7 +72,7 @@ class NodoVision(Node):
         super().__init__('nodo_vision')
 
         # Declarar parámetros
-        self.declare_parameter('modelo_dir', os.path.expanduser('~/ros2_ws/models/botellas_vs_latas_ncnn'))
+        self.declare_parameter('modelo_dir', os.path.expanduser('~/custom-sensor-actuator-ros2/IA/models/botellas_ncnn_model'))
         self.declare_parameter('conf_threshold', 0.45) # Bajado a 0.45 para latas
         self.declare_parameter('iou_threshold', 0.45)
         self.declare_parameter('input_size', 640)
