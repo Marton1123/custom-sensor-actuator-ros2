@@ -104,6 +104,7 @@ class NodoVision(Node):
         
         # Pre-allocate canvas
         self._canvas_espera = np.zeros((480, 640, 3), dtype=np.uint8)
+        cv2.putText(self._canvas_espera, 'ESPERANDO ELEMENTO...', (120, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
         self._canvas_analizando = np.zeros((480, 640, 3), dtype=np.uint8)
         
         # NCNN init
@@ -310,8 +311,8 @@ class NodoVision(Node):
             return
 
         img_h, img_w = img.shape[:2]
-        out_raw = img.copy()
-        out_seg = self._canvas_espera.copy()
+        out_raw = img
+        out_seg = self._canvas_espera
         out_estado = self._ultimo_veredicto
         out_area = 0.0
 
@@ -353,6 +354,7 @@ class NodoVision(Node):
             run_inference()
             if best_obj in ["bottle", "can"]:
                 self._frames_botella += 1
+                out_raw = img.copy()
                 bx1, by1, bx2, by2 = map(int, best_box)
                 cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (0, 255, 0), 2)
                 cv2.putText(out_raw, f"{best_obj.upper()} {best_score:.2f}", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
@@ -373,7 +375,8 @@ class NodoVision(Node):
             self._frames_analizando += 1
             bx1, by1, bx2, by2 = map(int, self._box_congelado)
             
-            clase_str = "LATA" if self._id_congelado == "can" else "BOTELLA" if self._id_congelado == "bottle" else self._id_congelado.upper()
+            clase_str = "LATA" if self._id_congelado == "can" else "BOTELLA"
+            out_raw = img.copy()
             cv2.putText(out_raw, f"ANALIZANDO {clase_str}...", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (0, 255, 255), 2)
             
@@ -383,16 +386,21 @@ class NodoVision(Node):
 
             if self._frames_analizando >= 15:
                 self._estado_actual = 'ESPERA_RETIRO'
-                seg_img, estado_limpieza = self._aplicar_segmentacion(self._frame_congelado, self._box_congelado)
                 
                 area = (bx2 - bx1) * (by2 - by1) * self.k_area
                 tamano_label = "GRANDE" if area > 1650 else "CHICO"
+                msg_grados = Float32()
+
+                if self._id_congelado == "bottle":
+                    seg_img, estado_limpieza = self._aplicar_segmentacion(self._frame_congelado, self._box_congelado)
+                    self._ultimo_veredicto = f"Elemento: {clase_str} - {tamano_label}: {estado_limpieza}"
+                    msg_grados.data = 90.0 if estado_limpieza == "OPTIMO" else 0.0
+                else:
+                    self._ultimo_veredicto = f"Elemento: {clase_str} - {tamano_label}: OPTIMO"
+                    msg_grados.data = -90.0
                 
-                self._ultimo_veredicto = f"Elemento: {clase_str} - {tamano_label}: {estado_limpieza}"
                 out_estado = self._ultimo_veredicto
                 
-                msg_grados = Float32()
-                msg_grados.data = 90.0 if estado_limpieza == "OPTIMO" else 0.0
                 self.pub_comando_grados.publish(msg_grados)
                 self._frames_vacio = 0
 
@@ -403,12 +411,18 @@ class NodoVision(Node):
             else:
                 self._frames_vacio += 1
 
-            seg_img, _ = self._aplicar_segmentacion(self._frame_congelado, self._box_congelado)
-            out_seg = seg_img
+            if self._id_congelado == "bottle":
+                seg_img, _ = self._aplicar_segmentacion(self._frame_congelado, self._box_congelado)
+                out_seg = seg_img
+            else:
+                out_seg = np.zeros((480, 640, 3), dtype=np.uint8)
+                out_seg[:] = (100, 0, 0)
+                cv2.putText(out_seg, 'LATA ACEPTADA', (140, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
             
+            out_raw = img.copy()
             bx1, by1, bx2, by2 = map(int, self._box_congelado)
             cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (255, 0, 0), 2)
-            clase_str = "LATA" if self._id_congelado == "can" else "BOTELLA" if self._id_congelado == "bottle" else self._id_congelado.upper()
+            clase_str = "LATA" if self._id_congelado == "can" else "BOTELLA"
             cv2.putText(out_raw, f"RETIRE {clase_str}", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
             
             out_estado = self._ultimo_veredicto

@@ -213,6 +213,7 @@ class VentanaPrincipal(QMainWindow):
         self.lbl_banner.setObjectName("lbl_banner")
         self.lbl_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_banner.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
+        self.lbl_banner.setWordWrap(True)
         layout.addWidget(self.lbl_banner)
 
         # Videos en Layout Vertical
@@ -225,6 +226,7 @@ class VentanaPrincipal(QMainWindow):
         for lbl in (self.lbl_camara_raw, self.lbl_camara_seg):
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setFixedSize(ANCHO_VISOR, ALTO_VISOR)
+            lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             lbl.setScaledContents(False)
             
         layout.addWidget(self.lbl_camara_raw, alignment=Qt.AlignmentFlag.AlignCenter)
