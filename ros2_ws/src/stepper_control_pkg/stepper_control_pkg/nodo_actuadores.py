@@ -19,10 +19,10 @@ GPIO lib : lgpio  (sudo apt install python3-lgpio)
 
 Conversión grados → pasos:
     pasos = int(round((grados / 360.0) * pasos_por_rev))
-    Con pasos_por_rev=800 (microstepping 1/4):
-        90°  →  200 pasos
-        45°  →  100 pasos
-        1°   →    2.22 pasos ≈ 2 pasos
+    Con pasos_por_rev=3200 (microstepping 1/16):
+        90°  →  800 pasos
+        45°  →  400 pasos
+        1°   →    8.89 pasos ≈ 9 pasos
 
 Velocidad:
     El parámetro 'delay_pulso' (s) controla el tiempo de cada semi-ciclo del
@@ -75,10 +75,10 @@ class NodoActuadores(Node):
         gpio_chip    (int)   : chip GPIO [default: 4  → /dev/gpiochip4 en RPi5]
         pin_step     (int)   : pin PUL+  [default: 17]
         pin_dir      (int)   : pin DIR+  [default: 27]
-        pasos_por_rev(int)   : pasos/revolución incluyendo microstepping [default: 800]
-        delay_pulso  (float) : semi-ciclo del pulso STEP en segundos     [default: 0.0015]
+        pasos_por_rev(int)   : pasos/revolución incluyendo microstepping [default: 3200]
+        delay_pulso  (float) : semi-ciclo del pulso STEP en segundos     [default: 0.0005]
                                → Periodo completo = 2 × delay_pulso
-                               → 0.0015 s → 3 ms/ciclo → 333.3 pasos/s → ≈25 RPM
+                               → 0.0005 s → 1 ms/ciclo → 1000 pasos/s → ≈18.75 RPM
     """
 
     TOPIC_COMANDO_MOTOR  = "/comando_motor"
@@ -100,8 +100,8 @@ class NodoActuadores(Node):
         self.declare_parameter("gpio_chip",    4)
         self.declare_parameter("pin_step",    17)
         self.declare_parameter("pin_dir",     27)
-        self.declare_parameter("pasos_por_rev", 800)
-        self.declare_parameter("delay_pulso",   0.0015)
+        self.declare_parameter("pasos_por_rev", 3200)
+        self.declare_parameter("delay_pulso",   0.0005)
 
         self._gpio_chip:     int = self.get_parameter("gpio_chip").get_parameter_value().integer_value
         self._pin_step:      int = self.get_parameter("pin_step").get_parameter_value().integer_value
@@ -205,10 +205,10 @@ class NodoActuadores(Node):
         Conversión:
             pasos = int(round((grados / 360.0) * pasos_por_rev))
 
-        Ejemplos con pasos_por_rev=800:
-            +90.0°  →  +200 pasos  (CW)
-            -45.5°  →  -101 pasos  (CCW)
-            +360.0° → +800 pasos  (1 vuelta completa CW)
+        Ejemplos con pasos_por_rev=3200:
+            +90.0°  →  +800 pasos  (CW)
+            -45.5°  →  -404 pasos  (CCW)
+            +360.0° → +3200 pasos  (1 vuelta completa CW)
                0.0° →    0 pasos   (stop)
         """
         grados = msg.data
@@ -295,11 +295,17 @@ class NodoActuadores(Node):
         dir_str    = "CW (+)" if pasos > 0 else "CCW (-)"
 
         # Lee delay_pulso en el momento de inicio (recoge ros2 param set)
-        delay: float = (
+        delay_objetivo: float = (
             self.get_parameter("delay_pulso").get_parameter_value().double_value
         )
-        periodo_ms = delay * 2 * 1000   # periodo completo en ms (solo para log)
-        tiempo_total_s = n_pasos * delay * 2
+        
+        # Parámetros de rampa
+        delay_inicial = 0.005
+        pasos_rampa = 800  # Pasos de rampa para 3200 ppr (suaviza la transición)
+        if n_pasos < pasos_rampa * 2:
+            pasos_rampa = n_pasos // 2
+
+        periodo_ms = delay_objetivo * 2 * 1000   # periodo crucero en ms (para log)
 
         # ── Fija la dirección y da tiempo de setup al TB6600 ──────────────
         lgpio.gpio_write(self._h, self._pin_dir, direccion)
@@ -307,13 +313,12 @@ class NodoActuadores(Node):
 
         self.get_logger().info(
             f"Movimiento iniciado | {dir_str} | {n_pasos} pasos | "
-            f"delay={delay*1000:.2f} ms/semi-ciclo | periodo={periodo_ms:.2f} ms | "
-            f"tiempo estimado={tiempo_total_s:.2f} s"
+            f"delay_crucero={delay_objetivo*1000:.2f} ms | rampa={pasos_rampa} pasos"
         )
 
         pasos_hechos = 0
 
-        for _ in range(n_pasos):
+        for i in range(n_pasos):
 
             # Comprueba cancelación antes de cada pulso
             if self._cancelar.is_set():
@@ -322,11 +327,24 @@ class NodoActuadores(Node):
                 )
                 break
 
+            # Calcular delay actual (rampa trapezoidal)
+            if i < pasos_rampa:
+                # Aceleración
+                progreso = i / pasos_rampa
+                delay_actual = delay_inicial - progreso * (delay_inicial - delay_objetivo)
+            elif i >= n_pasos - pasos_rampa:
+                # Desaceleración
+                progreso = (n_pasos - i) / pasos_rampa
+                delay_actual = delay_inicial - progreso * (delay_inicial - delay_objetivo)
+            else:
+                # Velocidad crucero
+                delay_actual = delay_objetivo
+
             # ── Pulso STEP ────────────────────────────────────────────────
             lgpio.gpio_write(self._h, self._pin_step, 1)   # flanco de subida
-            time.sleep(delay)                               # HIGH durante delay
+            time.sleep(delay_actual)                       # HIGH durante delay
             lgpio.gpio_write(self._h, self._pin_step, 0)   # flanco de bajada
-            time.sleep(delay)                               # LOW durante delay
+            time.sleep(delay_actual)                       # LOW durante delay
 
             pasos_hechos += 1
 
