@@ -2,6 +2,7 @@
 """
 nodo_vision.py
 Nodo de inferencia NCNN para modelo YOLOv8n (2 clases: bottle vs can).
+Restaurado con Máquina de Estados (FSM) y SPoP.
 """
 
 import sys
@@ -36,6 +37,8 @@ def generate_anchors(strides=[8, 16, 32], grid_sizes=[80, 40, 20]):
     return np.concatenate(anchor_points, axis=0), np.concatenate(stride_tensor, axis=0)
 
 def nms(boxes, scores, iou_thresh):
+    if len(boxes) == 0:
+        return []
     x1 = boxes[:, 0]
     y1 = boxes[:, 1]
     x2 = boxes[:, 2]
@@ -59,7 +62,7 @@ def nms(boxes, scores, iou_thresh):
         h = np.maximum(0.0, yy2 - yy1)
         inter = w * h
         
-        iou = inter / (areas[i] + areas[order[1:]] - inter)
+        iou = inter / (areas[i] + areas[order[1:]] - inter + 1e-7)
         inds = np.where(iou <= iou_thresh)[0]
         order = order[inds + 1]
     return keep
@@ -70,7 +73,7 @@ class NodoVision(Node):
 
         # Declarar parámetros
         self.declare_parameter('modelo_dir', os.path.expanduser('~/ros2_ws/models/botellas_vs_latas_ncnn'))
-        self.declare_parameter('conf_threshold', 0.70)
+        self.declare_parameter('conf_threshold', 0.45) # Bajado a 0.45 para latas
         self.declare_parameter('iou_threshold', 0.45)
         self.declare_parameter('input_size', 640)
         self.declare_parameter('k_area', 0.05)
@@ -85,14 +88,26 @@ class NodoVision(Node):
         self.num_threads = self.get_parameter('num_threads').get_parameter_value().integer_value
 
         self.get_logger().info(f"Cargando modelo NCNN desde: {self.modelo_dir}")
-        self.get_logger().info(f"Parametros: conf={self.conf_threshold}, iou={self.iou_threshold}, threads={self.num_threads}")
-
-        # Clases según 02_train.py
+        
         self.classes = {0: "bottle", 1: "can"}
         
-        # Inicializar NCNN
+        # FSM Inicializacion
+        self._estado_actual = 'BUSQUEDA'
+        self._frames_botella = 0
+        self._frames_vacio = 0
+        self._frames_analizando = 0
+        self._frame_congelado = None
+        self._id_congelado = None
+        self._box_congelado = None
+        self._ultimo_veredicto = "vacio"
+        
+        # Pre-allocate canvas
+        self._canvas_espera = np.zeros((480, 640, 3), dtype=np.uint8)
+        self._canvas_analizando = np.zeros((480, 640, 3), dtype=np.uint8)
+        
+        # NCNN init
         self.net = ncnn.Net()
-        self.net.opt.use_vulkan_compute = False  # Cambiar a True si se compila NCNN con Vulkan y se requiere GPU
+        self.net.opt.use_vulkan_compute = False
         self.net.opt.num_threads = self.num_threads
 
         param_path = os.path.join(self.modelo_dir, 'model.ncnn.param')
@@ -105,14 +120,12 @@ class NodoVision(Node):
         self.net.load_param(param_path)
         self.net.load_model(bin_path)
 
-        # Precomputar anclas YOLOv8 (640x640)
         self.anchors, self.strides = generate_anchors(
             strides=[8, 16, 32], 
             grid_sizes=[self.input_size // 8, self.input_size // 16, self.input_size // 32]
         )
         self.dfl_weights = np.arange(16, dtype=np.float32).reshape(1, 16, 1)
 
-        # Configurar QoS BEST_EFFORT
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
@@ -128,26 +141,53 @@ class NodoVision(Node):
             qos_profile
         )
 
-        # Publicadores
-        self.pub_objeto = self.create_publisher(String, '/objeto_detectado', 10)
+        # Publicadores unificados (SPoP)
+        self.pub_raw = self.create_publisher(Image, '/camara/video_raw', qos_profile)
+        self.pub_seg = self.create_publisher(Image, '/camara/video_segmentado', qos_profile)
+        self.pub_clasificacion = self.create_publisher(String, '/clasificacion_objeto', 10)
         self.pub_tamano = self.create_publisher(Float32, '/tamano_estimado', 10)
-        self.pub_bottle = self.create_publisher(Bool, '/botella_detectada', 10)
-        self.pub_can = self.create_publisher(Bool, '/lata_detectada', 10)
+        self.pub_comando_grados = self.create_publisher(Float32, '/comando_grados', 10)
 
-        self.get_logger().info("Nodo_vision iniciado correctamente. Esperando imágenes...")
+        self.get_logger().info("Nodo_vision iniciado (FSM + SPoP). Esperando imagenes...")
+
+    def _aplicar_segmentacion(self, frame_bgr, bbox):
+        frame_copia = frame_bgr.copy()
+        x1, y1, x2, y2 = map(int, bbox)
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(frame_copia.shape[1], x2), min(frame_copia.shape[0], y2)
+
+        if (x2 <= x1) or (y2 <= y1):
+            return frame_copia, "OPTIMO"
+
+        roi = frame_copia[y1:y2, x1:x2]
+        roi_hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+
+        mask_dark = cv2.inRange(roi_hsv, np.array([0, 0, 0]), np.array([179, 255, 80]))
+        mask_sat = cv2.inRange(roi_hsv, np.array([0, 100, 0]), np.array([179, 255, 255]))
+        mask_anomalia = cv2.bitwise_or(mask_dark, mask_sat)
+
+        total_pixels = roi.shape[0] * roi.shape[1]
+        anomalia_pixels = np.count_nonzero(mask_anomalia)
+        porcentaje = anomalia_pixels / total_pixels if total_pixels > 0 else 0.0
+
+        estado_limpieza = "OPTIMO" if porcentaje < 0.10 else "ANOMALIA"
+
+        anomalia_bgr = np.zeros_like(roi)
+        anomalia_bgr[mask_anomalia > 0] = [0, 0, 255]
+
+        canvas = cv2.addWeighted(frame_copia, 0.3, np.zeros_like(frame_copia), 0, 0)
+        canvas[y1:y2, x1:x2] = anomalia_bgr
+
+        return canvas, estado_limpieza
 
     def decode_yolov8(self, raw_output, img_w, img_h, scale_w, scale_h, pad_w, pad_h):
-        # raw_output shape esperado: (66, 8400) -> 64 para DFL (regresión) + 2 clases
         if raw_output.shape[0] != 66 or raw_output.shape[1] != 8400:
-            self.get_logger().warn(f"Salida de red inesperada: {raw_output.shape}")
             return [], [], []
 
         coords_raw = raw_output[:64, :]
         cls_raw = raw_output[64:, :]
 
-        # Sigmoide para las clases
         cls_scores = 1.0 / (1.0 + np.exp(-cls_raw))
-        
         max_scores = np.max(cls_scores, axis=0)
         class_ids = np.argmax(cls_scores, axis=0)
 
@@ -160,26 +200,22 @@ class NodoVision(Node):
         valid_class_ids = class_ids[valid_mask]
         
         valid_coords = coords_raw[:, valid_mask].reshape(4, 16, -1)
-        valid_anchors = self.anchors[valid_mask].T  # (2, N)
-        valid_strides = self.strides[valid_mask].T  # (1, N)
+        valid_anchors = self.anchors[valid_mask].T
+        valid_strides = self.strides[valid_mask].T
 
-        # DFL Softmax
         x = softmax(valid_coords, axis=1)
-        dfl_coords = np.sum(x * self.dfl_weights, axis=1)  # (4, N)
+        dfl_coords = np.sum(x * self.dfl_weights, axis=1)
 
-        # Restaurar a xyxy escalado (l, t, r, b)
         x1 = (valid_anchors[0] - dfl_coords[0]) * valid_strides[0]
         y1 = (valid_anchors[1] - dfl_coords[1]) * valid_strides[0]
         x2 = (valid_anchors[0] + dfl_coords[2]) * valid_strides[0]
         y2 = (valid_anchors[1] + dfl_coords[3]) * valid_strides[0]
 
-        # Ajustar pads y escalar a proporciones originales
         x1 = (x1 - pad_w) / scale_w
         y1 = (y1 - pad_h) / scale_h
         x2 = (x2 - pad_w) / scale_w
         y2 = (y2 - pad_h) / scale_h
 
-        # Limitar dentro de la imagen
         x1 = np.clip(x1, 0, img_w)
         y1 = np.clip(y1, 0, img_h)
         x2 = np.clip(x2, 0, img_w)
@@ -187,7 +223,6 @@ class NodoVision(Node):
 
         boxes = np.stack([x1, y1, x2, y2], axis=1)
 
-        # nms separado por clase
         final_boxes, final_scores, final_class_ids = [], [], []
         for cls_id in np.unique(valid_class_ids):
             cls_mask = valid_class_ids == cls_id
@@ -204,81 +239,154 @@ class NodoVision(Node):
         return final_boxes, final_scores, final_class_ids
 
     def image_callback(self, msg):
+        # Proteccion anti-loop si compartimos el topico
+        if msg.header.frame_id == "nodo_vision_procesado":
+            return
+
         try:
-            # ROS a OpenCV (bgr8 para proceso)
             img = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-        except Exception as e:
-            self.get_logger().error(f"Error al procesar imagen: {e}")
+        except Exception:
             return
 
         img_h, img_w = img.shape[:2]
+        out_raw = img.copy()
+        out_seg = self._canvas_espera.copy()
+        out_estado = self._ultimo_veredicto
+        out_area = 0.0
 
-        # Preprocesamiento YOLO (Letterbox)
         scale = min(self.input_size / img_w, self.input_size / img_h)
         new_w = int(img_w * scale)
         new_h = int(img_h * scale)
         pad_w = (self.input_size - new_w) // 2
         pad_h = (self.input_size - new_h) // 2
 
-        resized_img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        canvas = np.full((self.input_size, self.input_size, 3), 114, dtype=np.uint8)
-        canvas[pad_h:pad_h+new_h, pad_w:pad_w+new_w] = resized_img
+        if self._estado_actual in ['BUSQUEDA', 'ESPERA_RETIRO']:
+            resized_img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            canvas = np.full((self.input_size, self.input_size, 3), 114, dtype=np.uint8)
+            canvas[pad_h:pad_h+new_h, pad_w:pad_w+new_w] = resized_img
 
-        # Inferencia NCNN
-        # Convertir a formato NCNN mat (BGR a RGB implícito por YOLO)
-        mat_in = ncnn.Mat.from_pixels(canvas, ncnn.Mat.PixelType.PIXEL_BGR2RGB, self.input_size, self.input_size)
+            mat_in = ncnn.Mat.from_pixels(canvas, ncnn.Mat.PixelType.PIXEL_BGR2RGB, self.input_size, self.input_size)
+            mat_in.substract_mean_normalize([0.0, 0.0, 0.0], [1/255.0, 1/255.0, 1/255.0])
+
+            ex = self.net.create_extractor()
+            ex.input("in0", mat_in)
+            ret, mat_out = ex.extract("out0")
+
+            best_obj = ""
+            best_score = 0.0
+            best_box = None
+
+            if ret == 0:
+                raw_output = np.array(mat_out)
+                boxes, scores, class_ids = self.decode_yolov8(raw_output, img_w, img_h, scale, scale, pad_w, pad_h)
+                if len(scores) > 0:
+                    best_idx = np.argmax(scores)
+                    best_score = scores[best_idx]
+                    cls_num = class_ids[best_idx]
+                    best_obj = self.classes.get(cls_num, "desconocido")
+                    best_box = boxes[best_idx]
+
+        # ---------------- FSM ----------------
+        if self._estado_actual == 'BUSQUEDA':
+            if best_obj in ["bottle", "can"]:
+                self._frames_botella += 1
+                bx1, by1, bx2, by2 = map(int, best_box)
+                cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (0, 255, 0), 2)
+                cv2.putText(out_raw, f"{best_obj.upper()} {best_score:.2f}", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                out_estado = "analizando"
+            else:
+                self._frames_botella = 0
+                out_estado = "vacio"
+            
+            if self._frames_botella >= 15:
+                self._frame_congelado = img.copy()
+                self._id_congelado = best_obj
+                self._box_congelado = best_box
+                self._estado_actual = 'ANALIZANDO'
+                self._frames_analizando = 0
+                out_estado = "analizando"
+
+        elif self._estado_actual == 'ANALIZANDO':
+            self._frames_analizando += 1
+            bx1, by1, bx2, by2 = map(int, self._box_congelado)
+            
+            clase_str = "LATA" if self._id_congelado == "can" else "BOTELLA" if self._id_congelado == "bottle" else self._id_congelado.upper()
+            cv2.putText(out_raw, f"ANALIZANDO {clase_str}...", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (0, 255, 255), 2)
+            
+            out_seg = self._canvas_analizando.copy()
+            cv2.putText(out_seg, f"ANALIZANDO {clase_str}...", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            out_estado = "analizando"
+
+            if self._frames_analizando >= 15:
+                self._estado_actual = 'ESPERA_RETIRO'
+                seg_img, estado_limpieza = self._aplicar_segmentacion(self._frame_congelado, self._box_congelado)
+                
+                area = (bx2 - bx1) * (by2 - by1) * self.k_area
+                tamano_label = "GRANDE" if area > 1650 else "CHICO"
+                
+                self._ultimo_veredicto = f"Elemento: {clase_str} - {tamano_label}: {estado_limpieza}"
+                out_estado = self._ultimo_veredicto
+                
+                msg_grados = Float32()
+                msg_grados.data = 90.0 if estado_limpieza == "OPTIMO" else 0.0
+                self.pub_comando_grados.publish(msg_grados)
+                self._frames_vacio = 0
+
+        elif self._estado_actual == 'ESPERA_RETIRO':
+            if best_obj in ["bottle", "can"] and best_score > 0.40:
+                self._frames_vacio = 0
+            else:
+                self._frames_vacio += 1
+
+            seg_img, _ = self._aplicar_segmentacion(self._frame_congelado, self._box_congelado)
+            out_seg = seg_img
+            
+            bx1, by1, bx2, by2 = map(int, self._box_congelado)
+            cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (255, 0, 0), 2)
+            clase_str = "LATA" if self._id_congelado == "can" else "BOTELLA" if self._id_congelado == "bottle" else self._id_congelado.upper()
+            cv2.putText(out_raw, f"RETIRE {clase_str}", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+            
+            out_estado = self._ultimo_veredicto
+
+            if self._frames_vacio >= 30:
+                self._estado_actual = 'RESETEO'
+
+        elif self._estado_actual == 'RESETEO':
+            self._estado_actual = 'BUSQUEDA'
+            self._frames_botella = 0
+            out_estado = "vacio"
+            msg_grados = Float32()
+            msg_grados.data = 0.0
+            self.pub_comando_grados.publish(msg_grados)
+
+        # ----------------------------------------------------
+        # SPoP - Single Point of Publication
+        # ----------------------------------------------------
+        out_raw_c = np.ascontiguousarray(out_raw)
+        out_seg_c = np.ascontiguousarray(out_seg)
+
+        msg_raw = self.bridge.cv2_to_imgmsg(out_raw_c, encoding="bgr8")
+        msg_raw.header = msg.header
+        msg_raw.header.frame_id = "nodo_vision_procesado"
         
-        # Normalizar si YOLO exportado lo demanda (Ultralytics usualmente es x/255)
-        mean_vals = [0.0, 0.0, 0.0]
-        norm_vals = [1/255.0, 1/255.0, 1/255.0]
-        mat_in.substract_mean_normalize(mean_vals, norm_vals)
+        msg_seg = self.bridge.cv2_to_imgmsg(out_seg_c, encoding="bgr8")
+        msg_seg.header = msg.header
+        msg_seg.header.frame_id = "nodo_vision_procesado"
 
-        ex = self.net.create_extractor()
-        ex.input("in0", mat_in)
-        
-        ret, mat_out = ex.extract("out0")
-        if ret != 0:
-            self.get_logger().error("Error en extraccion de red")
-            return
+        self.pub_raw.publish(msg_raw)
+        self.pub_seg.publish(msg_seg)
 
-        raw_output = np.array(mat_out)
-        boxes, scores, class_ids = self.decode_yolov8(raw_output, img_w, img_h, scale, scale, pad_w, pad_h)
-        
-        # Seleccionar mejor predicción (mayor score)
-        best_obj = ""
-        best_area = 0.0
-        best_score = 0.0
-
-        if len(scores) > 0:
-            best_idx = np.argmax(scores)
-            best_score = scores[best_idx]
-            cls_num = class_ids[best_idx]
-            best_obj = self.classes.get(cls_num, "")
-
-            # Area en cm2 (estimado k_area)
-            bx1, by1, bx2, by2 = boxes[best_idx]
-            best_area = (bx2 - bx1) * (by2 - by1) * self.k_area
-
-        # Publicar resultados
         msg_obj = String()
-        msg_obj.data = best_obj
-        self.pub_objeto.publish(msg_obj)
-
-        msg_tamano = Float32()
-        msg_tamano.data = float(best_area)
-        self.pub_tamano.publish(msg_tamano)
-
-        msg_bottle = Bool()
-        msg_bottle.data = (best_obj == "bottle")
-        self.pub_bottle.publish(msg_bottle)
-
-        msg_can = Bool()
-        msg_can.data = (best_obj == "can")
-        self.pub_can.publish(msg_can)
+        msg_obj.data = out_estado
+        self.pub_clasificacion.publish(msg_obj)
+        
+        msg_tam = Float32()
+        msg_tam.data = out_area
+        self.pub_tamano.publish(msg_tam)
 
     def destroy_node(self):
-        self.get_logger().info("Limpiando recursos NCNN...")
-        if self.net:
+        if hasattr(self, 'net') and self.net:
             self.net.clear()
         super().destroy_node()
 
