@@ -89,14 +89,18 @@ def parse_yolov8_output(raw: np.ndarray, conf_thr: float, iou_thr: float, scale:
         data = data[0]
 
     data = data.T
-    confs = data[:, 4]
+    scores_per_class = data[:, 4:]
+    confs = np.max(scores_per_class, axis=1)
+    class_ids = np.argmax(scores_per_class, axis=1)
+
     mask  = confs >= conf_thr
     if not np.any(mask):
         return []
 
     filtered = data[mask]
+    filtered_class_ids = class_ids[mask]
     cx, cy, w, h = filtered[:, 0], filtered[:, 1], filtered[:, 2], filtered[:, 3]
-    scores = filtered[:, 4]
+    scores = confs[mask]
 
     x1 = (cx - w / 2 - pad_w) / scale
     y1 = (cy - h / 2 - pad_h) / scale
@@ -114,6 +118,7 @@ def parse_yolov8_output(raw: np.ndarray, conf_thr: float, iou_thr: float, scale:
             "x2":   float(boxes_xyxy[i, 2]),
             "y2":   float(boxes_xyxy[i, 3]),
             "conf": float(scores[i]),
+            "cls":  int(filtered_class_ids[i]),
         })
     return detections
 
@@ -420,7 +425,12 @@ class NodoCamara(Node):
                 img_seg, estado_limpieza = self._aplicar_segmentacion(frame.copy(), mejor_box)
                 
                 tamano_label = "GRANDE" if resultado == "grande" else "CHICO"
-                self._ultimo_veredicto = f"Elemento {tamano_label}: {estado_limpieza}"
+                
+                nombres_clases = ['botella', 'lata']
+                clase_idx = mejor_box.get("cls", 0)
+                clase_detectada = nombres_clases[clase_idx] if clase_idx < len(nombres_clases) else "desconocido"
+                
+                self._ultimo_veredicto = f"Elemento: {clase_detectada.upper()} - {tamano_label}: {estado_limpieza}"
 
                 cv2.rectangle(img_raw, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.putText(img_raw, f"{resultado} {mejor_conf:.2f}", (x1, max(0, y1 - 10)), 
