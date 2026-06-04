@@ -118,7 +118,6 @@ class NodoVision(Node):
         
         # Pre-allocate canvas
         self._canvas_espera = np.zeros((480, 640, 3), dtype=np.uint8)
-        cv2.putText(self._canvas_espera, 'ESPERANDO OBJETO PARA ANALIZAR', (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
         self._canvas_analizando = np.zeros((480, 640, 3), dtype=np.uint8)
         
         # NCNN init
@@ -422,7 +421,6 @@ class NodoVision(Node):
             cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (0, 255, 255), 2)
             
             out_seg = self._canvas_analizando.copy()
-            cv2.putText(out_seg, f"ANALIZANDO {clase_str}...", (160, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
             out_estado = "analizando"
 
             if self._frames_analizando >= 15:
@@ -458,17 +456,12 @@ class NodoVision(Node):
                 if "Aceptada" in self._ultimo_veredicto:
                     out_seg = np.zeros((480, 640, 3), dtype=np.uint8)
                     out_seg[:] = (0, 100, 0) # Verde
-                    cv2.putText(out_seg, 'BOTELLA ACEPTADA', (120, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
                 else:
                     seg_img, _ = self._aplicar_segmentacion(self._frame_congelado, self._box_congelado)
                     out_seg = seg_img
-                    # Texto UX con sombra para contraste sobre la radiografía
-                    cv2.putText(out_seg, 'BOTELLA RECHAZADA (Sucia)', (32, 242), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 5)
-                    cv2.putText(out_seg, 'BOTELLA RECHAZADA (Sucia)', (30, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
             else:
                 out_seg = np.zeros((480, 640, 3), dtype=np.uint8)
                 out_seg[:] = (150, 0, 0) # Azul oscuro
-                cv2.putText(out_seg, 'LATA ACEPTADA', (160, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
             
             bx1, by1, bx2, by2 = map(int, self._box_congelado)
             cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (255, 0, 0), 2)

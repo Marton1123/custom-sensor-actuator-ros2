@@ -216,7 +216,20 @@ class VentanaPrincipal(QMainWindow):
             lbl.setScaledContents(False)
             
         layout.addWidget(self.lbl_camara_raw, alignment=Qt.AlignmentFlag.AlignCenter)
+        
+        separador = QFrame()
+        separador.setFrameShape(QFrame.Shape.HLine)
+        separador.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(separador)
+        
         layout.addWidget(self.lbl_camara_seg, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        self.lbl_veredicto_inferior = QLabel("")
+        self.lbl_veredicto_inferior.setObjectName("lbl_veredicto_inferior")
+        self.lbl_veredicto_inferior.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold;")
+        self.lbl_veredicto_inferior.setWordWrap(True)
+        layout.addWidget(self.lbl_veredicto_inferior)
 
     def _actualizar_raw(self, img: QImage) -> None:
         self.lbl_camara_raw.setPixmap(QPixmap.fromImage(img).scaled(
@@ -236,17 +249,27 @@ class VentanaPrincipal(QMainWindow):
         if self._ultimo_estado == "vacio":
             self.lbl_banner.setText("Por favor, inserte un envase")
             self.lbl_banner.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
+            self.lbl_veredicto_inferior.setText("Esperando envase...")
+            self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold; color: #808080;")
         elif self._ultimo_estado == "analizando":
             self.lbl_banner.setText("ESTABILIZANDO... POR FAVOR RETIRE LA MANO.")
             self.lbl_banner.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
+            self.lbl_veredicto_inferior.setText("Analizando...")
+            self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold; color: #808000;")
         else:
+            self.lbl_banner.setText(self._ultimo_estado)
             if "Aceptada" in self._ultimo_estado:
                 self.lbl_banner.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: #008000; padding: 10px;")
+                self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold; color: #008000;")
+                self.lbl_veredicto_inferior.setText(self._ultimo_estado.upper())
             elif "Rechazada" in self._ultimo_estado:
                 self.lbl_banner.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: #800000; padding: 10px;")
+                self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold; color: #800000;")
+                self.lbl_veredicto_inferior.setText("BOTELLA RECHAZADA (Sucia)")
             else:
                 self.lbl_banner.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
-            self.lbl_banner.setText(self._ultimo_estado)
+                self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold; color: #000000;")
+                self.lbl_veredicto_inferior.setText(self._ultimo_estado.upper())
 
     def keyPressEvent(self, event) -> None:
         super().keyPressEvent(event)
