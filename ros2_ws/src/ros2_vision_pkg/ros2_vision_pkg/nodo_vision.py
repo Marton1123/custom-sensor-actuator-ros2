@@ -429,15 +429,18 @@ class NodoVision(Node):
                 self._estado_actual = 'ESPERA_RETIRO'
                 
                 area = (bx2 - bx1) * (by2 - by1) * self.k_area
-                tamano_label = "GRANDE" if area > 1650 else "CHICO"
                 msg_grados = Float32()
 
                 if self._id_congelado == "bottle":
                     seg_img, estado_limpieza = self._aplicar_segmentacion(self._frame_congelado, self._box_congelado)
-                    self._ultimo_veredicto = f"Elemento: {clase_str} - {tamano_label}: {estado_limpieza}"
-                    msg_grados.data = 90.0 if estado_limpieza == "OPTIMO" else 0.0
+                    if estado_limpieza == "OPTIMO":
+                        self._ultimo_veredicto = "¡Botella Aceptada!"
+                        msg_grados.data = 90.0
+                    else:
+                        self._ultimo_veredicto = "Botella Rechazada (Por favor, enjuáguela)"
+                        msg_grados.data = 0.0
                 else:
-                    self._ultimo_veredicto = f"Elemento: {clase_str} - {tamano_label}: OPTIMO"
+                    self._ultimo_veredicto = "¡Lata Aceptada!"
                     msg_grados.data = -90.0
                 
                 out_estado = self._ultimo_veredicto
@@ -451,12 +454,18 @@ class NodoVision(Node):
             else:
                 self._frames_vacio += 1
 
+            out_seg = np.zeros((480, 640, 3), dtype=np.uint8)
+            
             if self._id_congelado == "bottle":
-                seg_img, _ = self._aplicar_segmentacion(self._frame_congelado, self._box_congelado)
-                out_seg = seg_img
+                if "Aceptada" in self._ultimo_veredicto:
+                    out_seg[:] = (0, 100, 0) # Verde
+                    cv2.putText(out_seg, 'BOTELLA ACEPTADA', (120, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
+                else:
+                    out_seg[:] = (0, 0, 150) # Rojo
+                    cv2.putText(out_seg, 'BOTELLA RECHAZADA', (100, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
             else:
-                out_seg = np.zeros((480, 640, 3), dtype=np.uint8)
-                cv2.putText(out_seg, 'LATA ACEPTADA', (180, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
+                out_seg[:] = (150, 0, 0) # Azul oscuro
+                cv2.putText(out_seg, 'LATA ACEPTADA', (160, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
             
             bx1, by1, bx2, by2 = map(int, self._box_congelado)
             cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (255, 0, 0), 2)
