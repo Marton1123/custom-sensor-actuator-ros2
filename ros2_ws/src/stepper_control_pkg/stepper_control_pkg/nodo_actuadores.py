@@ -100,14 +100,12 @@ class NodoActuadores(Node):
         self.declare_parameter("gpio_chip",    4)
         self.declare_parameter("pin_step",    17)
         self.declare_parameter("pin_dir",     27)
-        self.declare_parameter("pasos_por_rev", 1600)
-        self.declare_parameter("delay_pulso",   0.001)
 
         self._gpio_chip:     int = self.get_parameter("gpio_chip").get_parameter_value().integer_value
         self._pin_step:      int = self.get_parameter("pin_step").get_parameter_value().integer_value
         self._pin_dir:       int = self.get_parameter("pin_dir").get_parameter_value().integer_value
-        # pasos_por_rev y delay_pulso se leen dinámicamente en cada movimiento
-        # (ver _ejecutar_pasos) para respetar cambios hechos con ros2 param set.
+        
+        self.pasos_por_revolucion = 200
 
         # ── Estado del hilo de movimiento ──────────────────────────────────
         # DISEÑO DE CONCURRENCIA:
@@ -157,13 +155,10 @@ class NodoActuadores(Node):
         # ── Inicialización GPIO ────────────────────────────────────────────
         self._h: int = self._init_gpio()
 
-        pasos_por_rev = self.get_parameter("pasos_por_rev").get_parameter_value().integer_value
-        delay_pulso   = self.get_parameter("delay_pulso").get_parameter_value().double_value
-
         self.get_logger().info(
             f"NodoActuadores listo\n"
             f"  GPIO  : gpiochip{self._gpio_chip} | PUL=GPIO{self._pin_step} | DIR=GPIO{self._pin_dir}\n"
-            f"  Motor : {pasos_por_rev} pasos/rev | delay={delay_pulso*1000:.2f} ms/semi-ciclo\n"
+            f"  Motor : {self.pasos_por_revolucion} pasos/rev\n"
             f"  Topics: '{self.TOPIC_COMANDO_MOTOR}' (Int32 pasos directos)\n"
             f"          '{self.TOPIC_COMANDO_GRADOS}' (Float32 grados)"
         )
@@ -208,26 +203,23 @@ class NodoActuadores(Node):
         """
         Recibe un ángulo en grados (Float32), lo convierte a pasos y lanza
         el movimiento usando el mismo hilo daemon que /comando_motor.
-
-        Conversión:
-            pasos = int(round((grados / 360.0) * pasos_por_rev))
-
-        Ejemplos con pasos_por_rev=1600:
-            +90.0°  →  +400 pasos  (CW)
-            -45.5°  →  -202 pasos  (CCW)
-            +360.0° → +1600 pasos  (1 vuelta completa CW)
-               0.0° →    0 pasos   (stop)
         """
         grados = msg.data
-        pasos_por_rev: int = (
-            self.get_parameter("pasos_por_rev").get_parameter_value().integer_value
-        )
+        pasos_objetivo = int((abs(grados) / 360.0) * self.pasos_por_revolucion)
 
-        pasos = int(round((grados / 360.0) * pasos_por_rev))
+        # Lógica direccional
+        if grados > 0:
+            # Botella limpia, DIR en HIGH
+            pasos = pasos_objetivo
+        elif grados < 0:
+            # Lata, DIR en LOW
+            pasos = -pasos_objetivo
+        else:
+            pasos = 0
 
         self.get_logger().info(
-            f"[/comando_grados] {grados:+.2f}° → {pasos:+d} pasos "
-            f"(pasos_por_rev={pasos_por_rev})"
+            f"[/comando_grados] {grados:+.2f}° → {pasos_objetivo} pasos_objetivo "
+            f"(pasos_por_rev={self.pasos_por_revolucion})"
         )
         self._lanzar_movimiento(pasos)
 
@@ -241,9 +233,7 @@ class NodoActuadores(Node):
         if not objeto:
             return
             
-        pasos_por_rev: int = (
-            self.get_parameter("pasos_por_rev").get_parameter_value().integer_value
-        )
+        pasos_por_rev: int = self.pasos_por_revolucion
         
         if objeto == "bottle":
             self.get_logger().info("[IA] Botella detectada. Girando motor 360° CW.")
@@ -322,35 +312,39 @@ class NodoActuadores(Node):
             PUL → HIGH  ──── delay_pulso ────  PUL → LOW  ──── delay_pulso ────
             |←──────────────── 1 ciclo completo ───────────────────────────────→|
         """
-        n_pasos    = abs(pasos)
-        direccion  = _DIR_CW if pasos > 0 else _DIR_CCW
-        dir_str    = "CW (+)" if pasos > 0 else "CCW (-)"
+        pasos_objetivo = abs(pasos)
+        
+        if pasos > 0:
+            direccion = 1  # HIGH (Botella limpia)
+            dir_str = "CW (+) HIGH"
+        else:
+            direccion = 0  # LOW (Lata)
+            dir_str = "CCW (-) LOW"
 
-        # Lee delay_pulso en el momento de inicio (recoge ros2 param set)
-        delay: float = (
-            self.get_parameter("delay_pulso").get_parameter_value().double_value
-        )
+        # Delay conservador para Full Step (sin rampas de aceleración)
+        delay: float = 0.002
+        
         periodo_ms = delay * 2 * 1000   # periodo completo en ms (solo para log)
-        tiempo_total_s = n_pasos * delay * 2
+        tiempo_total_s = pasos_objetivo * delay * 2
 
         # ── Fija la dirección y da tiempo de setup al TB6600 ──────────────
         lgpio.gpio_write(self._h, self._pin_dir, direccion)
         time.sleep(0.005)   # 5 ms de settle para el TB6600 tras cambio de DIR
 
         self.get_logger().info(
-            f"Movimiento iniciado | {dir_str} | {n_pasos} pasos | "
+            f"Movimiento iniciado | {dir_str} | {pasos_objetivo} pasos | "
             f"delay={delay*1000:.2f} ms/semi-ciclo | periodo={periodo_ms:.2f} ms | "
             f"tiempo estimado={tiempo_total_s:.2f} s"
         )
 
         pasos_hechos = 0
 
-        for _ in range(n_pasos):
+        for _ in range(pasos_objetivo):
 
             # Comprueba cancelación antes de cada pulso
             if self._cancelar.is_set():
                 self.get_logger().info(
-                    f"Movimiento CANCELADO en paso {pasos_hechos}/{n_pasos}"
+                    f"Movimiento CANCELADO en paso {pasos_hechos}/{pasos_objetivo}"
                 )
                 break
 
@@ -365,7 +359,7 @@ class NodoActuadores(Node):
         else:
             # Bucle completado sin cancelación
             self.get_logger().info(
-                f"Movimiento COMPLETADO | {pasos_hechos}/{n_pasos} pasos | {dir_str}"
+                f"Movimiento COMPLETADO | {pasos_hechos}/{pasos_objetivo} pasos | {dir_str}"
             )
 
         # Garantiza que PUL quede en LOW al terminar
