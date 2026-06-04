@@ -454,16 +454,19 @@ class NodoVision(Node):
             else:
                 self._frames_vacio += 1
 
-            out_seg = np.zeros((480, 640, 3), dtype=np.uint8)
-            
             if self._id_congelado == "bottle":
                 if "Aceptada" in self._ultimo_veredicto:
+                    out_seg = np.zeros((480, 640, 3), dtype=np.uint8)
                     out_seg[:] = (0, 100, 0) # Verde
                     cv2.putText(out_seg, 'BOTELLA ACEPTADA', (120, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
                 else:
-                    out_seg[:] = (0, 0, 150) # Rojo
-                    cv2.putText(out_seg, 'BOTELLA RECHAZADA', (100, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
+                    seg_img, _ = self._aplicar_segmentacion(self._frame_congelado, self._box_congelado)
+                    out_seg = seg_img
+                    # Texto UX con sombra para contraste sobre la radiografía
+                    cv2.putText(out_seg, 'BOTELLA RECHAZADA (Sucia)', (32, 242), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 5)
+                    cv2.putText(out_seg, 'BOTELLA RECHAZADA (Sucia)', (30, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
             else:
+                out_seg = np.zeros((480, 640, 3), dtype=np.uint8)
                 out_seg[:] = (150, 0, 0) # Azul oscuro
                 cv2.putText(out_seg, 'LATA ACEPTADA', (160, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
             
