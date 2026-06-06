@@ -439,13 +439,13 @@ class NodoVision(Node):
                 if self._id_congelado == "bottle":
                     seg_img, estado_limpieza = self._aplicar_segmentacion(self._frame_congelado, self._box_congelado)
                     if estado_limpieza == "OPTIMO":
-                        self._ultimo_veredicto = "¡Botella Aceptada!"
+                        self._ultimo_veredicto = "¡BOTELLA ACEPTADA!\n\n👉 Presione el botón inferior para procesar 👈"
                         self._grado_a_publicar = 90.0
                     else:
-                        self._ultimo_veredicto = "Botella Rechazada (Por favor, enjuáguela)"
+                        self._ultimo_veredicto = "BOTELLA RECHAZADA (Sucia)\n\n👉 Presione el botón inferior para devolver 👈"
                         self._grado_a_publicar = 0.0
                 else:
-                    self._ultimo_veredicto = "¡Lata Aceptada!"
+                    self._ultimo_veredicto = "¡LATA ACEPTADA!\n\n👉 Presione el botón inferior para procesar 👈"
                     self._grado_a_publicar = -90.0
                 
                 out_estado = self._ultimo_veredicto
@@ -462,7 +462,7 @@ class NodoVision(Node):
             cv2.putText(out_raw, f"{clase_str} DETECTADA", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
             if self._id_congelado == "bottle":
-                if "Aceptada" in self._ultimo_veredicto:
+                if "ACEPTADA" in self._ultimo_veredicto:
                     out_seg = np.zeros((480, 640, 3), dtype=np.uint8)
                     out_seg[:] = (0, 100, 0) # Verde
                 else:
@@ -487,7 +487,7 @@ class NodoVision(Node):
                 self._frames_vacio += 1
 
             if self._id_congelado == "bottle":
-                if "Aceptada" in self._ultimo_veredicto:
+                if "ACEPTADA" in self._ultimo_veredicto:
                     out_seg = np.zeros((480, 640, 3), dtype=np.uint8)
                     out_seg[:] = (0, 100, 0) # Verde
                 else:

@@ -236,15 +236,18 @@ class VentanaPrincipal(QMainWindow):
         self.lbl_veredicto_inferior.setWordWrap(True)
         layout.addWidget(self.lbl_veredicto_inferior)
 
-        self.btn_confirmar = QPushButton("CONFIRMAR ACCIÓN")
+        self.btn_confirmar = QPushButton("✅ CONFIRMAR Y GIRAR MOTOR")
         self.btn_confirmar.setObjectName("btn_confirmar")
-        self.btn_confirmar.setStyleSheet("font-size: 18pt; font-weight: bold; background-color: #008000; color: #FFFFFF; padding: 15px;")
+        self._estilo_btn_inactivo = "background-color: #D3D3D3; color: #696969; font-size: 18pt; font-weight: bold; border-radius: 10px; padding: 15px;"
+        self._estilo_btn_activo = "background-color: #006400; color: #FFFFFF; font-size: 18pt; font-weight: bold; border-radius: 10px; padding: 15px;"
+        self.btn_confirmar.setStyleSheet(self._estilo_btn_inactivo)
         self.btn_confirmar.setEnabled(False)
         self.btn_confirmar.clicked.connect(self._on_confirmar_clicked)
         layout.addWidget(self.btn_confirmar)
 
     def _on_confirmar_clicked(self) -> None:
         self.btn_confirmar.setEnabled(False)
+        self.btn_confirmar.setStyleSheet(self._estilo_btn_inactivo)
         self._nodo.publicar_confirmacion()
 
     def _actualizar_raw(self, img: QImage) -> None:
@@ -263,11 +266,12 @@ class VentanaPrincipal(QMainWindow):
         self._ultimo_estado = estado
         
         self.btn_confirmar.setEnabled(False)
+        self.btn_confirmar.setStyleSheet(self._estilo_btn_inactivo)
         
         if self._ultimo_estado == "vacio":
             self.lbl_banner.setText("Por favor, inserte un envase")
             self.lbl_banner.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
-            self.lbl_veredicto_inferior.setText("Esperando envase...")
+            self.lbl_veredicto_inferior.setText("ESPERANDO ENVASE...\nInserte una lata o botella en el centro de la cámara.")
             self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold; color: #808080;")
         elif self._ultimo_estado == "analizando":
             self.lbl_banner.setText("ESTABILIZANDO... POR FAVOR RETIRE LA MANO.")
@@ -275,17 +279,19 @@ class VentanaPrincipal(QMainWindow):
             self.lbl_veredicto_inferior.setText("Analizando...")
             self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold; color: #808000;")
         else:
-            self.lbl_banner.setText(self._ultimo_estado)
-            if "Aceptada" in self._ultimo_estado:
+            self.lbl_banner.setText(self._ultimo_estado.split('\n')[0])
+            if "ACEPTADA" in self._ultimo_estado.upper():
                 self.lbl_banner.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: #008000; padding: 10px;")
                 self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold; color: #008000;")
-                self.lbl_veredicto_inferior.setText(self._ultimo_estado.upper())
+                self.lbl_veredicto_inferior.setText(self._ultimo_estado)
                 self.btn_confirmar.setEnabled(True)
-            elif "Rechazada" in self._ultimo_estado:
+                self.btn_confirmar.setStyleSheet(self._estilo_btn_activo)
+            elif "RECHAZADA" in self._ultimo_estado.upper():
                 self.lbl_banner.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: #800000; padding: 10px;")
                 self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold; color: #800000;")
-                self.lbl_veredicto_inferior.setText("BOTELLA RECHAZADA (Sucia)")
+                self.lbl_veredicto_inferior.setText(self._ultimo_estado)
                 self.btn_confirmar.setEnabled(True)
+                self.btn_confirmar.setStyleSheet(self._estilo_btn_activo)
             else:
                 self.lbl_banner.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
                 self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold; color: #000000;")
