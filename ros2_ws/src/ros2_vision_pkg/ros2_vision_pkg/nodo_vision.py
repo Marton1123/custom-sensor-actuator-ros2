@@ -17,7 +17,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image
-from std_msgs.msg import String, Float32, Bool
+from std_msgs.msg import String, Float32, Bool, Empty
 from cv_bridge import CvBridge
 
 import ncnn
@@ -163,7 +163,13 @@ class NodoVision(Node):
         self.pub_tamano = self.create_publisher(Float32, '/tamano_estimado', 10)
         self.pub_comando_grados = self.create_publisher(Float32, '/comando_grados', 10)
 
+        self.sub_confirmacion = self.create_subscription(Empty, '/ui/confirmacion', self._cb_confirmacion, 10)
+        self._confirmacion_recibida = False
+
         self.get_logger().info("Nodo_vision iniciado (FSM + SPoP). Esperando imagenes...")
+
+    def _cb_confirmacion(self, msg: Empty):
+        self._confirmacion_recibida = True
 
     def _aplicar_segmentacion(self, frame_bgr, bbox):
         frame_copia = frame_bgr.copy()
@@ -424,27 +430,55 @@ class NodoVision(Node):
             out_estado = "analizando"
 
             if self._frames_analizando >= 15:
-                self._estado_actual = 'ESPERA_RETIRO'
+                self._estado_actual = 'ESPERA_CONFIRMACION'
+                self._confirmacion_recibida = False
                 
                 area = (bx2 - bx1) * (by2 - by1) * self.k_area
-                msg_grados = Float32()
+                self._grado_a_publicar = 0.0
 
                 if self._id_congelado == "bottle":
                     seg_img, estado_limpieza = self._aplicar_segmentacion(self._frame_congelado, self._box_congelado)
                     if estado_limpieza == "OPTIMO":
                         self._ultimo_veredicto = "¡Botella Aceptada!"
-                        msg_grados.data = 90.0
+                        self._grado_a_publicar = 90.0
                     else:
                         self._ultimo_veredicto = "Botella Rechazada (Por favor, enjuáguela)"
-                        msg_grados.data = 0.0
+                        self._grado_a_publicar = 0.0
                 else:
                     self._ultimo_veredicto = "¡Lata Aceptada!"
-                    msg_grados.data = -90.0
+                    self._grado_a_publicar = -90.0
                 
                 out_estado = self._ultimo_veredicto
                 
+                self._frames_vacio = 0
+
+        elif self._estado_actual == 'ESPERA_CONFIRMACION':
+            out_raw = self._frame_congelado.copy() # Congelado
+            out_estado = self._ultimo_veredicto
+            bx1, by1, bx2, by2 = map(int, self._box_congelado)
+            
+            cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (0, 255, 255), 2)
+            clase_str = "LATA" if self._id_congelado == "can" else "BOTELLA"
+            cv2.putText(out_raw, f"{clase_str} DETECTADA", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+            if self._id_congelado == "bottle":
+                if "Aceptada" in self._ultimo_veredicto:
+                    out_seg = np.zeros((480, 640, 3), dtype=np.uint8)
+                    out_seg[:] = (0, 100, 0) # Verde
+                else:
+                    seg_img, _ = self._aplicar_segmentacion(self._frame_congelado, self._box_congelado)
+                    out_seg = seg_img
+            else:
+                out_seg = np.zeros((480, 640, 3), dtype=np.uint8)
+                out_seg[:] = (150, 0, 0) # Azul oscuro
+
+            if self._confirmacion_recibida:
+                self._estado_actual = 'ESPERA_RETIRO'
+                msg_grados = Float32()
+                msg_grados.data = self._grado_a_publicar
                 self.pub_comando_grados.publish(msg_grados)
                 self._frames_vacio = 0
+                self._confirmacion_recibida = False
 
         elif self._estado_actual == 'ESPERA_RETIRO':
             if best_obj in ["bottle", "can"] and best_score > 0.40:

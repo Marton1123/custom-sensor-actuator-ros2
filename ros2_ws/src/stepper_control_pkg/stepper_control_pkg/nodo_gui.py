@@ -14,7 +14,7 @@ import rclpy
 import rclpy.executors
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-from std_msgs.msg import Float32, String, Bool
+from std_msgs.msg import Float32, String, Bool, Empty
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 
@@ -23,7 +23,7 @@ from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QSizePolicy, QFrame
+    QLabel, QSizePolicy, QFrame, QPushButton
 )
 
 WIN95_GRAY   = "#D4D0C8"
@@ -106,7 +106,12 @@ class NodoGUI(Node):
         self._pending_seg = None
         self.create_timer(1.0 / 15.0, self._flush_frames)
 
+        self.pub_confirmacion = self.create_publisher(Empty, "/ui/confirmacion", 10)
+
         self.get_logger().info("NodoGUI (Dashboard) iniciado de forma pasiva.")
+
+    def publicar_confirmacion(self):
+        self.pub_confirmacion.publish(Empty())
 
     def registrar_callbacks(self, fn_raw, fn_seg, fn_estado):
         with self._fn_lock:
@@ -231,6 +236,17 @@ class VentanaPrincipal(QMainWindow):
         self.lbl_veredicto_inferior.setWordWrap(True)
         layout.addWidget(self.lbl_veredicto_inferior)
 
+        self.btn_confirmar = QPushButton("CONFIRMAR ACCIÓN")
+        self.btn_confirmar.setObjectName("btn_confirmar")
+        self.btn_confirmar.setStyleSheet("font-size: 18pt; font-weight: bold; background-color: #008000; color: #FFFFFF; padding: 15px;")
+        self.btn_confirmar.setEnabled(False)
+        self.btn_confirmar.clicked.connect(self._on_confirmar_clicked)
+        layout.addWidget(self.btn_confirmar)
+
+    def _on_confirmar_clicked(self) -> None:
+        self.btn_confirmar.setEnabled(False)
+        self._nodo.publicar_confirmacion()
+
     def _actualizar_raw(self, img: QImage) -> None:
         self.lbl_camara_raw.setPixmap(QPixmap.fromImage(img).scaled(
             ANCHO_VISOR, ALTO_VISOR, Qt.AspectRatioMode.KeepAspectRatio
@@ -245,6 +261,8 @@ class VentanaPrincipal(QMainWindow):
         if self._ultimo_estado == estado:
             return
         self._ultimo_estado = estado
+        
+        self.btn_confirmar.setEnabled(False)
         
         if self._ultimo_estado == "vacio":
             self.lbl_banner.setText("Por favor, inserte un envase")
@@ -262,10 +280,12 @@ class VentanaPrincipal(QMainWindow):
                 self.lbl_banner.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: #008000; padding: 10px;")
                 self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold; color: #008000;")
                 self.lbl_veredicto_inferior.setText(self._ultimo_estado.upper())
+                self.btn_confirmar.setEnabled(True)
             elif "Rechazada" in self._ultimo_estado:
                 self.lbl_banner.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: #800000; padding: 10px;")
                 self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold; color: #800000;")
                 self.lbl_veredicto_inferior.setText("BOTELLA RECHAZADA (Sucia)")
+                self.btn_confirmar.setEnabled(True)
             else:
                 self.lbl_banner.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
                 self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold; color: #000000;")
