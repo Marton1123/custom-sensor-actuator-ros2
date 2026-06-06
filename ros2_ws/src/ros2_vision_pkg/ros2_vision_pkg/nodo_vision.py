@@ -108,6 +108,7 @@ class NodoVision(Node):
         self._last_best_box = None
         self._last_best_score = 0.0
         self._ultimo_estado_publicado = ""
+        self._tiempo_retiro = None
         
         # Hilo de inferencia
         self._inference_lock = threading.Lock()
@@ -430,26 +431,30 @@ class NodoVision(Node):
             out_estado = "analizando"
 
             if self._frames_analizando >= 15:
-                self._estado_actual = 'ESPERA_CONFIRMACION'
-                self._confirmacion_recibida = False
-                
                 area = (bx2 - bx1) * (by2 - by1) * self.k_area
                 self._grado_a_publicar = 0.0
 
                 if self._id_congelado == "bottle":
                     seg_img, estado_limpieza = self._aplicar_segmentacion(self._frame_congelado, self._box_congelado)
                     if estado_limpieza == "OPTIMO":
-                        self._ultimo_veredicto = "¡BOTELLA ACEPTADA!\n\n👉 Presione el botón inferior para procesar 👈"
+                        self._estado_actual = 'ESPERA_CONFIRMACION'
+                        self._confirmacion_recibida = False
+                        self._ultimo_veredicto = "BOTELLA ACEPTADA\n\nPresione CONFIRMAR para procesar."
                         self._grado_a_publicar = 90.0
                     else:
-                        self._ultimo_veredicto = "BOTELLA RECHAZADA (Sucia)\n\n👉 Presione el botón inferior para devolver 👈"
-                        self._grado_a_publicar = 0.0
+                        self._estado_actual = 'ESPERA_RETIRO'
+                        self._ultimo_veredicto = "BOTELLA RECHAZADA (Sucia)\n\nPor favor, retire el envase de la cámara."
+                        self._tiempo_retiro = None
+                        msg_grados = Float32()
+                        msg_grados.data = 0.0
+                        self.pub_comando_grados.publish(msg_grados)
                 else:
-                    self._ultimo_veredicto = "¡LATA ACEPTADA!\n\n👉 Presione el botón inferior para procesar 👈"
+                    self._estado_actual = 'ESPERA_CONFIRMACION'
+                    self._confirmacion_recibida = False
+                    self._ultimo_veredicto = "LATA ACEPTADA\n\nPresione CONFIRMAR para procesar."
                     self._grado_a_publicar = -90.0
                 
                 out_estado = self._ultimo_veredicto
-                
                 self._frames_vacio = 0
 
         elif self._estado_actual == 'ESPERA_CONFIRMACION':
@@ -478,6 +483,7 @@ class NodoVision(Node):
                 msg_grados.data = self._grado_a_publicar
                 self.pub_comando_grados.publish(msg_grados)
                 self._frames_vacio = 0
+                self._tiempo_retiro = None
                 self._confirmacion_recibida = False
 
         elif self._estado_actual == 'ESPERA_RETIRO':
@@ -505,7 +511,11 @@ class NodoVision(Node):
             out_estado = self._ultimo_veredicto
 
             if self._frames_vacio >= 10:
-                self._estado_actual = 'RESETEO'
+                if not hasattr(self, '_tiempo_retiro') or self._tiempo_retiro is None:
+                    self._tiempo_retiro = time.time()
+                elif time.time() - self._tiempo_retiro >= 2.5:
+                    self._estado_actual = 'RESETEO'
+                    self._tiempo_retiro = None
 
         elif self._estado_actual == 'RESETEO':
             self._estado_actual = 'BUSQUEDA'
