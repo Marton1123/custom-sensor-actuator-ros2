@@ -271,34 +271,52 @@ class VentanaPrincipal(QMainWindow):
         self.btn_confirmar.setStyleSheet(self._estilo_btn_inactivo)
         self.btn_confirmar.setVisible(False)
         
-        if "|" in estado:
+        if estado.count("|") >= 2:
+            partes = estado.split("|", 2)
+            banner_txt = partes[0]
+            veredicto_txt = partes[1]
+            boton_txt = partes[2]
+        elif "|" in estado:
             banner_txt, veredicto_txt = estado.split("|", 1)
+            boton_txt = "NONE"
         else:
-            banner_txt = "ESTADO: DESCONOCIDO"
+            banner_txt = "ESTADO DESCONOCIDO"
             veredicto_txt = estado
+            boton_txt = "NONE"
 
+        # Determinación de colores
+        banner_bg = "#808080"
+        inferior_color = "#808080"
+        
         if "DISPONIBLE" in banner_txt:
-            self.lbl_banner.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: #808080; padding: 10px;")
-            self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold; color: #808080;")
-        elif "RETORNANDO" in banner_txt:
-            self.lbl_banner.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: #FFA500; padding: 10px;")
-            self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold; color: #FFA500;")
+            banner_bg = "#808080"
+            inferior_color = "#808080"
+        elif "MOVIMIENTO MECÁNICO" in banner_txt or "ESPERE" in veredicto_txt.upper():
+            banner_bg = "#2563eb"  # Azul de Seguridad
+            inferior_color = "#2563eb"
         elif "ACEPTADA" in veredicto_txt.upper():
-            self.lbl_banner.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: #008000; padding: 10px;")
-            self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold; color: #008000;")
+            banner_bg = "#008000"
+            inferior_color = "#008000"
+        elif "RECHAZADA" in veredicto_txt.upper() or "SUCIA" in veredicto_txt.upper():
+            banner_bg = "#800000"
+            inferior_color = "#800000"
+        else:
+            banner_bg = "#808000"
+            inferior_color = "#808000"
+
+        self.lbl_banner.setStyleSheet(f"font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: {banner_bg}; padding: 10px;")
+        self.lbl_veredicto_inferior.setStyleSheet(f"font-size: 20pt; font-weight: bold; color: {inferior_color};")
+        self.lbl_banner.setText(banner_txt)
+        self.lbl_veredicto_inferior.setText(veredicto_txt)
+
+        if boton_txt != "NONE":
+            self.btn_confirmar.setText(boton_txt)
             self.btn_confirmar.setVisible(True)
             self.btn_confirmar.setEnabled(True)
             self.btn_confirmar.setStyleSheet(self._estilo_btn_activo)
-        elif "RECHAZADA" in veredicto_txt.upper():
-            self.lbl_banner.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: #800000; padding: 10px;")
-            self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold; color: #800000;")
         else:
-            # Procesando envase
-            self.lbl_banner.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: #808000; padding: 10px;")
-            self.lbl_veredicto_inferior.setStyleSheet("font-size: 20pt; font-weight: bold; color: #808000;")
-
-        self.lbl_banner.setText(banner_txt)
-        self.lbl_veredicto_inferior.setText(veredicto_txt)
+            self.btn_confirmar.setVisible(False)
+            self.btn_confirmar.setEnabled(False)
 
     def keyPressEvent(self, event) -> None:
         super().keyPressEvent(event)

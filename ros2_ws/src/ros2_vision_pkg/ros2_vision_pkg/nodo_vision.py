@@ -102,7 +102,7 @@ class NodoVision(Node):
         self._frame_congelado = None
         self._id_congelado = None
         self._box_congelado = None
-        self._ultimo_veredicto = "ESTADO: SISTEMA DISPONIBLE|ESPERANDO ENVASE...\nInserte una lata o botella en el centro."
+        self._ultimo_veredicto = "SISTEMA DISPONIBLE|Esperando envase...\nInserte una lata o botella en el centro.|NONE"
         self._lost_frames = 0
         self._last_best_obj = None
         self._last_best_box = None
@@ -120,6 +120,7 @@ class NodoVision(Node):
         # Pre-allocate canvas
         self._canvas_espera = np.zeros((480, 640, 3), dtype=np.uint8)
         self._canvas_analizando = np.zeros((480, 640, 3), dtype=np.uint8)
+        self._frozen_seg_img = np.zeros((480, 640, 3), dtype=np.uint8)
         
         # NCNN init
         self.net = ncnn.Net()
@@ -388,7 +389,7 @@ class NodoVision(Node):
 
         # ---------------- FSM ----------------
         if self._estado_actual == 'BUSQUEDA':
-            out_estado = "ESTADO: SISTEMA DISPONIBLE|ESPERANDO ENVASE...\nInserte una lata o botella en el centro."
+            out_estado = "SISTEMA DISPONIBLE|Esperando envase...\nInserte una lata o botella en el centro.|NONE"
             
             if best_obj in ["bottle", "can"]:
                 self._frames_botella += 1
@@ -416,7 +417,7 @@ class NodoVision(Node):
                 self._box_congelado = best_box
                 self._estado_actual = 'ANALIZANDO'
                 self._frames_analizando = 0
-                self._ultimo_veredicto = "ESTADO: PROCESANDO ENVASE|ESTABILIZANDO...\nPor favor, retire la mano."
+                self._ultimo_veredicto = "PROCESAMIENTO EN CURSO|Estabilizando...\nPor favor, retire la mano.|NONE"
                 out_estado = self._ultimo_veredicto
 
         elif self._estado_actual == 'ANALIZANDO':
@@ -439,43 +440,50 @@ class NodoVision(Node):
                     if estado_limpieza == "OPTIMO":
                         self._estado_actual = 'ESPERA_CONFIRMACION'
                         self._confirmacion_recibida = False
-                        self._ultimo_veredicto = "ESTADO: PROCESANDO ENVASE|BOTELLA ACEPTADA\n\nPresione CONFIRMAR para procesar."
+                        self._ultimo_veredicto = "PROCESAMIENTO EN CURSO|BOTELLA ACEPTADA\n\nPresione CONFIRMAR para procesar.|CONFIRMAR Y GIRAR"
                         self._grado_a_publicar = 90.0
+                        
+                        self._frozen_seg_img = np.zeros((480, 640, 3), dtype=np.uint8)
+                        self._frozen_seg_img[:] = (0, 150, 0)
+                        text_size = cv2.getTextSize("BOTELLA ACEPTADA", cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3)[0]
+                        text_x = (640 - text_size[0]) // 2
+                        text_y = (480 + text_size[1]) // 2
+                        cv2.putText(self._frozen_seg_img, "BOTELLA ACEPTADA", (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
+
                     else:
                         self._estado_actual = 'ESPERA_RETIRO'
-                        self._ultimo_veredicto = "ESTADO: PROCESANDO ENVASE|BOTELLA RECHAZADA (Sucia)\n\nPor favor, retire el envase de la cámara."
-                        self._tiempo_retiro = None
+                        self._ultimo_veredicto = "PROCESAMIENTO EN CURSO|BOTELLA RECHAZADA (Sucia)\n\nPor favor, retire el envase de la cámara.|NONE"
                         msg_grados = Float32()
                         msg_grados.data = 0.0
                         self.pub_comando_grados.publish(msg_grados)
+                        
+                        self._frozen_seg_img = seg_img
+                        cv2.rectangle(self._frozen_seg_img, (0, 0), (640, 480), (0, 0, 255), 15)
                 else:
                     self._estado_actual = 'ESPERA_CONFIRMACION'
                     self._confirmacion_recibida = False
-                    self._ultimo_veredicto = "ESTADO: PROCESANDO ENVASE|LATA ACEPTADA\n\nPresione CONFIRMAR para procesar."
+                    self._ultimo_veredicto = "PROCESAMIENTO EN CURSO|LATA ACEPTADA\n\nPresione CONFIRMAR para procesar.|CONFIRMAR Y GIRAR"
                     self._grado_a_publicar = -90.0
+                    
+                    self._frozen_seg_img = np.zeros((480, 640, 3), dtype=np.uint8)
+                    self._frozen_seg_img[:] = (0, 150, 0)
+                    text_size = cv2.getTextSize("LATA ACEPTADA", cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3)[0]
+                    text_x = (640 - text_size[0]) // 2
+                    text_y = (480 + text_size[1]) // 2
+                    cv2.putText(self._frozen_seg_img, "LATA ACEPTADA", (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
                 
                 out_estado = self._ultimo_veredicto
                 self._frames_vacio = 0
 
         elif self._estado_actual == 'ESPERA_CONFIRMACION':
-            out_raw = self._frame_congelado.copy() # Congelado
+            out_raw = self._frame_congelado.copy()
             out_estado = self._ultimo_veredicto
+            out_seg = self._frozen_seg_img.copy()
+
             bx1, by1, bx2, by2 = map(int, self._box_congelado)
-            
             cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (0, 255, 255), 2)
             clase_str = "LATA" if self._id_congelado == "can" else "BOTELLA"
             cv2.putText(out_raw, f"{clase_str} DETECTADA", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
-            if self._id_congelado == "bottle":
-                if "ACEPTADA" in self._ultimo_veredicto:
-                    out_seg = np.zeros((480, 640, 3), dtype=np.uint8)
-                    out_seg[:] = (0, 100, 0) # Verde
-                else:
-                    seg_img, _ = self._aplicar_segmentacion(self._frame_congelado, self._box_congelado)
-                    out_seg = seg_img
-            else:
-                out_seg = np.zeros((480, 640, 3), dtype=np.uint8)
-                out_seg[:] = (150, 0, 0) # Azul oscuro
 
             if self._confirmacion_recibida:
                 self._estado_actual = 'ESPERA_RETIRO'
@@ -483,48 +491,41 @@ class NodoVision(Node):
                 msg_grados.data = self._grado_a_publicar
                 self.pub_comando_grados.publish(msg_grados)
                 self._frames_vacio = 0
-                self._tiempo_retiro = None
-                self._ultimo_veredicto = "ESTADO: PROCESANDO ENVASE|Procesando...\nPor favor, retire el envase."
+                self._ultimo_veredicto = "MOVIMIENTO MECÁNICO|Procesando...\nPor favor, retire el envase.|NONE"
                 self._confirmacion_recibida = False
 
         elif self._estado_actual == 'ESPERA_RETIRO':
+            out_seg = self._frozen_seg_img.copy()
+            out_estado = self._ultimo_veredicto
+            
             if best_obj in ["bottle", "can"] and best_score > 0.40:
                 self._frames_vacio = 0
             else:
                 self._frames_vacio += 1
-
-            if self._id_congelado == "bottle":
-                if "ACEPTADA" in self._ultimo_veredicto:
-                    out_seg = np.zeros((480, 640, 3), dtype=np.uint8)
-                    out_seg[:] = (0, 100, 0) # Verde
-                else:
-                    seg_img, _ = self._aplicar_segmentacion(self._frame_congelado, self._box_congelado)
-                    out_seg = seg_img
-            else:
-                out_seg = np.zeros((480, 640, 3), dtype=np.uint8)
-                out_seg[:] = (150, 0, 0) # Azul oscuro
             
             bx1, by1, bx2, by2 = map(int, self._box_congelado)
             cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (255, 0, 0), 2)
             clase_str = "LATA" if self._id_congelado == "can" else "BOTELLA"
             cv2.putText(out_raw, f"RETIRE {clase_str}", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
             
-            out_estado = self._ultimo_veredicto
-
             if self._frames_vacio >= 10:
-                if not hasattr(self, '_tiempo_retiro') or self._tiempo_retiro is None:
-                    self._tiempo_retiro = time.time()
-                    self._ultimo_veredicto = "ESTADO: RETORNANDO MECANISMO|POR FAVOR ESPERE. MANTENGA LAS MANOS ALEJADAS."
-                    out_estado = self._ultimo_veredicto
-                elif time.time() - self._tiempo_retiro >= 2.0:
-                    self._estado_actual = 'RESETEO'
-                    self._tiempo_retiro = None
+                self._estado_actual = 'ESPERA_RETORNO'
+                self._confirmacion_recibida = False
+                self._ultimo_veredicto = "MOVIMIENTO MECÁNICO|Mecanismo liberado y listo.\nPor favor, aleje las manos y presione LIBERAR.|LIBERAR MECANISMO"
+
+        elif self._estado_actual == 'ESPERA_RETORNO':
+            out_seg = self._frozen_seg_img.copy()
+            out_estado = self._ultimo_veredicto
+            
+            if self._confirmacion_recibida:
+                self._estado_actual = 'RESETEO'
+                self._confirmacion_recibida = False
 
         elif self._estado_actual == 'RESETEO':
             self._estado_actual = 'BUSQUEDA'
             self._frames_botella = 0
             self._last_best_obj = None
-            out_estado = "ESTADO: SISTEMA DISPONIBLE|ESPERANDO ENVASE...\nInserte una lata o botella en el centro."
+            out_estado = "SISTEMA DISPONIBLE|Esperando envase...\nInserte una lata o botella en el centro.|NONE"
             msg_grados = Float32()
             msg_grados.data = 0.0
             self.pub_comando_grados.publish(msg_grados)
