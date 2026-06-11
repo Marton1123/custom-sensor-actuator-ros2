@@ -102,7 +102,7 @@ class NodoVision(Node):
         self._frame_congelado = None
         self._id_congelado = None
         self._box_congelado = None
-        self._ultimo_veredicto = "vacio"
+        self._ultimo_veredicto = "ESTADO: SISTEMA DISPONIBLE|ESPERANDO ENVASE...\nInserte una lata o botella en el centro."
         self._lost_frames = 0
         self._last_best_obj = None
         self._last_best_box = None
@@ -388,7 +388,7 @@ class NodoVision(Node):
 
         # ---------------- FSM ----------------
         if self._estado_actual == 'BUSQUEDA':
-            out_estado = "vacio"
+            out_estado = "ESTADO: SISTEMA DISPONIBLE|ESPERANDO ENVASE...\nInserte una lata o botella en el centro."
             
             if best_obj in ["bottle", "can"]:
                 self._frames_botella += 1
@@ -416,8 +416,8 @@ class NodoVision(Node):
                 self._box_congelado = best_box
                 self._estado_actual = 'ANALIZANDO'
                 self._frames_analizando = 0
-                self._ultimo_veredicto = "analizando"
-                out_estado = "analizando"
+                self._ultimo_veredicto = "ESTADO: PROCESANDO ENVASE|ESTABILIZANDO...\nPor favor, retire la mano."
+                out_estado = self._ultimo_veredicto
 
         elif self._estado_actual == 'ANALIZANDO':
             self._frames_analizando += 1
@@ -428,7 +428,7 @@ class NodoVision(Node):
             cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (0, 255, 255), 2)
             
             out_seg = self._canvas_analizando.copy()
-            out_estado = "analizando"
+            out_estado = self._ultimo_veredicto
 
             if self._frames_analizando >= 15:
                 area = (bx2 - bx1) * (by2 - by1) * self.k_area
@@ -439,11 +439,11 @@ class NodoVision(Node):
                     if estado_limpieza == "OPTIMO":
                         self._estado_actual = 'ESPERA_CONFIRMACION'
                         self._confirmacion_recibida = False
-                        self._ultimo_veredicto = "BOTELLA ACEPTADA\n\nPresione CONFIRMAR para procesar."
+                        self._ultimo_veredicto = "ESTADO: PROCESANDO ENVASE|BOTELLA ACEPTADA\n\nPresione CONFIRMAR para procesar."
                         self._grado_a_publicar = 90.0
                     else:
                         self._estado_actual = 'ESPERA_RETIRO'
-                        self._ultimo_veredicto = "BOTELLA RECHAZADA (Sucia)\n\nPor favor, retire el envase de la cámara."
+                        self._ultimo_veredicto = "ESTADO: PROCESANDO ENVASE|BOTELLA RECHAZADA (Sucia)\n\nPor favor, retire el envase de la cámara."
                         self._tiempo_retiro = None
                         msg_grados = Float32()
                         msg_grados.data = 0.0
@@ -451,7 +451,7 @@ class NodoVision(Node):
                 else:
                     self._estado_actual = 'ESPERA_CONFIRMACION'
                     self._confirmacion_recibida = False
-                    self._ultimo_veredicto = "LATA ACEPTADA\n\nPresione CONFIRMAR para procesar."
+                    self._ultimo_veredicto = "ESTADO: PROCESANDO ENVASE|LATA ACEPTADA\n\nPresione CONFIRMAR para procesar."
                     self._grado_a_publicar = -90.0
                 
                 out_estado = self._ultimo_veredicto
@@ -484,6 +484,7 @@ class NodoVision(Node):
                 self.pub_comando_grados.publish(msg_grados)
                 self._frames_vacio = 0
                 self._tiempo_retiro = None
+                self._ultimo_veredicto = "ESTADO: PROCESANDO ENVASE|Procesando...\nPor favor, retire el envase."
                 self._confirmacion_recibida = False
 
         elif self._estado_actual == 'ESPERA_RETIRO':
@@ -513,7 +514,9 @@ class NodoVision(Node):
             if self._frames_vacio >= 10:
                 if not hasattr(self, '_tiempo_retiro') or self._tiempo_retiro is None:
                     self._tiempo_retiro = time.time()
-                elif time.time() - self._tiempo_retiro >= 2.5:
+                    self._ultimo_veredicto = "ESTADO: RETORNANDO MECANISMO|POR FAVOR ESPERE. MANTENGA LAS MANOS ALEJADAS."
+                    out_estado = self._ultimo_veredicto
+                elif time.time() - self._tiempo_retiro >= 2.0:
                     self._estado_actual = 'RESETEO'
                     self._tiempo_retiro = None
 
@@ -521,7 +524,7 @@ class NodoVision(Node):
             self._estado_actual = 'BUSQUEDA'
             self._frames_botella = 0
             self._last_best_obj = None
-            out_estado = "vacio"
+            out_estado = "ESTADO: SISTEMA DISPONIBLE|ESPERANDO ENVASE...\nInserte una lata o botella en el centro."
             msg_grados = Float32()
             msg_grados.data = 0.0
             self.pub_comando_grados.publish(msg_grados)

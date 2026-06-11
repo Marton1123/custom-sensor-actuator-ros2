@@ -61,7 +61,7 @@ class NodoActuadores(Node):
         self.IN2 = 23
 
         # Configuración de tiempo
-        self.tiempo_90_grados = 0.4  # segundos
+        self.declare_parameter("tiempo_90_grados", 0.4)
 
         # Estado del motor
         self.posicion_actual = "CENTRO"  # "CENTRO", "BOTELLA", "LATA"
@@ -99,7 +99,7 @@ class NodoActuadores(Node):
         self.get_logger().info(
             f"NodoActuadores listo\n"
             f"  GPIO   : gpiochip{self._gpio_chip} | IN1=GPIO{self.IN1} | IN2=GPIO{self.IN2}\n"
-            f"  Tiempo : {self.tiempo_90_grados} s\n"
+            f"  Tiempo : {self.get_parameter('tiempo_90_grados').value} s\n"
             f"  Topics : '{self.TOPIC_COMANDO_GRADOS}'"
         )
 
@@ -178,10 +178,12 @@ class NodoActuadores(Node):
         """
         Ejecuta la acción solicitada respetando la máquina de estados.
         """
+        tiempo_90_grados = self.get_parameter('tiempo_90_grados').value
+
         if accion == "A_BOTELLA":
             if self.posicion_actual == "CENTRO":
                 self.get_logger().info("Moviendo a BOTELLA (IN1=1, IN2=0)")
-                self._activar_motor(1, 0, self.tiempo_90_grados)
+                self._activar_motor(1, 0, tiempo_90_grados)
                 self.posicion_actual = "BOTELLA"
             else:
                 self.get_logger().info(f"Ignorado. Estado actual: {self.posicion_actual}")
@@ -189,7 +191,7 @@ class NodoActuadores(Node):
         elif accion == "A_LATA":
             if self.posicion_actual == "CENTRO":
                 self.get_logger().info("Moviendo a LATA (IN1=0, IN2=1)")
-                self._activar_motor(0, 1, self.tiempo_90_grados)
+                self._activar_motor(0, 1, tiempo_90_grados)
                 self.posicion_actual = "LATA"
             else:
                 self.get_logger().info(f"Ignorado. Estado actual: {self.posicion_actual}")
@@ -197,11 +199,11 @@ class NodoActuadores(Node):
         elif accion == "RESET":
             if self.posicion_actual == "BOTELLA":
                 self.get_logger().info("Retornando desde BOTELLA (IN1=0, IN2=1)")
-                self._activar_motor(0, 1, self.tiempo_90_grados)
+                self._activar_motor(0, 1, tiempo_90_grados)
                 self.posicion_actual = "CENTRO"
             elif self.posicion_actual == "LATA":
                 self.get_logger().info("Retornando desde LATA (IN1=1, IN2=0)")
-                self._activar_motor(1, 0, self.tiempo_90_grados)
+                self._activar_motor(1, 0, tiempo_90_grados)
                 self.posicion_actual = "CENTRO"
             elif self.posicion_actual == "CENTRO":
                 self.get_logger().info("Ya en CENTRO. No hace nada.")
