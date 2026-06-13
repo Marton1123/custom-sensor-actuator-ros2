@@ -59,6 +59,7 @@ class NodoActuadores(Node):
         # Pines del L298N
         self.IN1 = 18
         self.IN2 = 23
+        self.pin_sensor_centro = 24
 
         # Configuración de tiempo
         self.declare_parameter("tiempo_90_grados", 0.4)
@@ -104,18 +105,18 @@ class NodoActuadores(Node):
         )
 
     def _init_gpio(self) -> int:
-        """
-        Abre /dev/gpiochipN y reclama IN1 y IN2 como salidas.
-        Inician en 0 (LOW) para que el motor empiece frenado.
-        """
         handle = lgpio.gpiochip_open(self._gpio_chip)
         lgpio.gpio_claim_output(handle, self.IN1, 0)
         lgpio.gpio_claim_output(handle, self.IN2, 0)
+        lgpio.gpio_claim_input(handle, self.pin_sensor_centro, lgpio.SET_PULL_UP)
         self.get_logger().info(
             f"GPIO OK → /dev/gpiochip{self._gpio_chip} | "
-            f"IN1=GPIO{self.IN1} IN2=GPIO{self.IN2}"
+            f"IN1=GPIO{self.IN1} IN2=GPIO{self.IN2} Sensor=GPIO{self.pin_sensor_centro}"
         )
         return handle
+
+    def _leer_sensor_centro(self) -> bool:
+        return lgpio.gpio_read(self._h, self.pin_sensor_centro) == 0
 
     def _cb_comando_grados(self, msg: Float32) -> None:
         """
@@ -198,15 +199,36 @@ class NodoActuadores(Node):
 
         elif accion == "RESET":
             if self.posicion_actual == "BOTELLA":
-                self.get_logger().info("Retornando desde BOTELLA (IN1=0, IN2=1)")
-                self._activar_motor(0, 1, tiempo_90_grados)
-                self.posicion_actual = "CENTRO"
+                self.get_logger().info("Retornando desde BOTELLA")
+                self._retornar_a_centro(0, 1)
             elif self.posicion_actual == "LATA":
-                self.get_logger().info("Retornando desde LATA (IN1=1, IN2=0)")
-                self._activar_motor(1, 0, tiempo_90_grados)
-                self.posicion_actual = "CENTRO"
+                self.get_logger().info("Retornando desde LATA")
+                self._retornar_a_centro(1, 0)
             elif self.posicion_actual == "CENTRO":
                 self.get_logger().info("Ya en CENTRO. No hace nada.")
+
+    def _retornar_a_centro(self, in1_val: int, in2_val: int) -> None:
+        lgpio.gpio_write(self._h, self.IN1, in1_val)
+        lgpio.gpio_write(self._h, self.IN2, in2_val)
+        
+        inicio = time.time()
+        timeout_maximo = 3.0
+        
+        while not self._leer_sensor_centro():
+            if self._cancelar.is_set():
+                break
+                
+            if (time.time() - inicio) > timeout_maximo:
+                self.get_logger().error("Falla mecanica o de sensor: Timeout de retorno excedido.")
+                break
+                
+            time.sleep(0.01)
+            
+        lgpio.gpio_write(self._h, self.IN1, 0)
+        lgpio.gpio_write(self._h, self.IN2, 0)
+        
+        if self._leer_sensor_centro():
+            self.posicion_actual = "CENTRO"
 
     def _activar_motor(self, in1_val: int, in2_val: int, duracion: float) -> None:
         """
@@ -252,6 +274,7 @@ class NodoActuadores(Node):
             # Liberar gpios y cerrar chip
             lgpio.gpio_free(self._h, self.IN1)
             lgpio.gpio_free(self._h, self.IN2)
+            lgpio.gpio_free(self._h, self.pin_sensor_centro)
             lgpio.gpiochip_close(self._h)
             self.get_logger().info("GPIO liberado correctamente.")
         except Exception as exc:
