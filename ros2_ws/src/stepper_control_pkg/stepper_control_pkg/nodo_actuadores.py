@@ -125,6 +125,10 @@ class NodoActuadores(Node):
         comando = msg.data
         self.get_logger().info(f"[/comando_grados] Recibido: {comando}")
         
+        if self.posicion_actual == "ERROR":
+            self.get_logger().warning("Intervencion manual requerida: Mecanismo en estado de ERROR. Comando ignorado.")
+            return
+
         accion = ""
         if comando == 90.0:
             accion = "A_BOTELLA"
@@ -213,13 +217,17 @@ class NodoActuadores(Node):
         
         inicio = time.time()
         timeout_maximo = 3.0
+        timeout_alcanzado = False
+        cancelado = False
         
         while not self._leer_sensor_centro():
             if self._cancelar.is_set():
+                cancelado = True
                 break
                 
             if (time.time() - inicio) > timeout_maximo:
                 self.get_logger().error("Falla mecanica o de sensor: Timeout de retorno excedido.")
+                timeout_alcanzado = True
                 break
                 
             time.sleep(0.01)
@@ -227,7 +235,9 @@ class NodoActuadores(Node):
         lgpio.gpio_write(self._h, self.IN1, 0)
         lgpio.gpio_write(self._h, self.IN2, 0)
         
-        if self._leer_sensor_centro():
+        if timeout_alcanzado:
+            self.posicion_actual = "ERROR"
+        elif not cancelado and self._leer_sensor_centro():
             self.posicion_actual = "CENTRO"
 
     def _activar_motor(self, in1_val: int, in2_val: int, duracion: float) -> None:
