@@ -15,7 +15,7 @@ El paquete `stepper_control_pkg` implementa una arquitectura modular de responsa
 | Componente | Modelo / Estándar | Interfaz |
 |---|---|---|
 | Unidad de cómputo | Raspberry Pi 5 (8 GB) | — |
-| Cámara | Cámara UVC compatible (p. ej. 640×480 @ 30 FPS) | USB / V4L2 `/dev/video0` |
+| Cámara | UVC o M5Stack UnitV K210/OV7740 | USB/V4L2 o UART |
 | Sensor de masa | Celda de carga + convertidor HX711 (24-bit ADC) | GPIO bit-banging (gpiozero) |
 | Motor paso a paso | NEMA 17 + controlador pulso/dirección (p. ej. TB6600) | GPIO lgpio — PUL/DIR |
 
@@ -36,7 +36,9 @@ El paquete `stepper_control_pkg` implementa una arquitectura modular de responsa
 
 | Nodo | Archivo | Descripción |
 |---|---|---|
-| `nodo_camara` | `nodo_camara.py` | Captura UVC + inferencia NCNN (YOLOv8) + análisis HSV de anomalías |
+| `nodo_camara` | `nodo_camara.py` | Captura una cámara UVC y publica video |
+| `nodo_k210_serial` | `nodo_k210_serial.py` | Recibe video JPEG y detecciones desde la UnitV |
+| `nodo_vision` | `nodo_vision.py` | FSM de clasificación con backend NCNN o K210 |
 | `nodo_gui` | `nodo_gui.py` | Dashboard HMI PyQt6 — visualización pasiva de todos los tópicos |
 | `nodo_balanza` | `nodo_balanza.py` | Lectura del sensor HX711, tara automática, publicación de masa |
 | `nodo_actuadores` | `nodo_actuadores.py` | Control GPIO del motor paso a paso vía lgpio |
@@ -115,8 +117,16 @@ source install/setup.bash
 ### Lanzamiento del Sistema Completo
 
 ```bash
+# Cámara UVC + YOLOv8/NCNN en Raspberry
 ros2 launch stepper_control_pkg main_launch.py
+
+# UnitV K210 + YOLOv2 en la cámara
+ros2 launch stepper_control_pkg k210_system.launch.py
 ```
+
+La preparación del dataset, el firmware MaixPy, el cableado UART y el
+entrenamiento cuantizado para K210 se documentan en
+[`IA/k210/README.md`](IA/k210/README.md).
 
 ### Ajuste de Parámetros en Tiempo de Ejecución
 

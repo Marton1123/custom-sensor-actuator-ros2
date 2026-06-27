@@ -28,6 +28,7 @@ setup(
     entry_points={
         'console_scripts': [
             'nodo_vision = ros2_vision_pkg.nodo_vision:main',
+            'nodo_k210_serial = ros2_vision_pkg.nodo_k210_serial:main',
         ],
     },
 )

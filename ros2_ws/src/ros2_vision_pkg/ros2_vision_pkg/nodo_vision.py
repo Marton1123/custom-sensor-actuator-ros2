@@ -9,18 +9,16 @@ import sys
 import os
 import cv2
 import numpy as np
-import math
 import threading
 import time
+import json
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image
-from std_msgs.msg import String, Float32, Bool, Empty
+from std_msgs.msg import String, Float32, Empty
 from cv_bridge import CvBridge
-
-import ncnn
 
 def softmax(x, axis=-1):
     x_max = np.max(x, axis=axis, keepdims=True)
@@ -81,6 +79,7 @@ class NodoVision(Node):
         self.declare_parameter('input_size', 640)
         self.declare_parameter('k_area', 0.05)
         self.declare_parameter('num_threads', 4)
+        self.declare_parameter('inference_backend', 'ncnn')
 
         # Leer parámetros
         self.modelo_dir = self.get_parameter('modelo_dir').get_parameter_value().string_value
@@ -89,8 +88,12 @@ class NodoVision(Node):
         self.input_size = self.get_parameter('input_size').get_parameter_value().integer_value
         self.k_area = self.get_parameter('k_area').get_parameter_value().double_value
         self.num_threads = self.get_parameter('num_threads').get_parameter_value().integer_value
+        self.inference_backend = (
+            self.get_parameter('inference_backend').get_parameter_value().string_value
+        ).lower()
 
-        self.get_logger().info(f"Cargando modelo NCNN desde: {self.modelo_dir}")
+        if self.inference_backend not in ('ncnn', 'k210'):
+            raise ValueError("inference_backend debe ser 'ncnn' o 'k210'")
         
         self.classes = {0: "bottle", 1: "can"}
         
@@ -114,34 +117,43 @@ class NodoVision(Node):
         self._inference_lock = threading.Lock()
         self._frame_for_inference = None
         self._latest_inference = {"best_obj": "", "best_score": 0.0, "best_box": None}
-        self._inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
-        self._inference_thread.start()
+        self._inference_thread = None
         
         # Pre-allocate canvas
         self._canvas_espera = np.zeros((480, 640, 3), dtype=np.uint8)
         self._canvas_analizando = np.zeros((480, 640, 3), dtype=np.uint8)
         self._frozen_seg_img = np.zeros((480, 640, 3), dtype=np.uint8)
         
-        # NCNN init
-        self.net = ncnn.Net()
-        self.net.opt.use_vulkan_compute = False
-        self.net.opt.num_threads = self.num_threads
+        # NCNN se carga únicamente cuando la inferencia corre en la Raspberry.
+        self.net = None
+        self._ncnn = None
+        if self.inference_backend == 'ncnn':
+            import ncnn
 
-        param_path = os.path.join(self.modelo_dir, 'model.ncnn.param')
-        bin_path = os.path.join(self.modelo_dir, 'model.ncnn.bin')
-        
-        if not os.path.exists(param_path) or not os.path.exists(bin_path):
-            self.get_logger().error(f"Archivos de modelo no encontrados en {self.modelo_dir}")
-            sys.exit(1)
+            self._ncnn = ncnn
+            self.get_logger().info(f"Cargando modelo NCNN desde: {self.modelo_dir}")
+            self.net = ncnn.Net()
+            self.net.opt.use_vulkan_compute = False
+            self.net.opt.num_threads = self.num_threads
 
-        self.net.load_param(param_path)
-        self.net.load_model(bin_path)
+            param_path = os.path.join(self.modelo_dir, 'model.ncnn.param')
+            bin_path = os.path.join(self.modelo_dir, 'model.ncnn.bin')
 
-        self.anchors, self.strides = generate_anchors(
-            strides=[8, 16, 32], 
-            grid_sizes=[self.input_size // 8, self.input_size // 16, self.input_size // 32]
-        )
-        self.dfl_weights = np.arange(16, dtype=np.float32).reshape(1, 16, 1)
+            if not os.path.exists(param_path) or not os.path.exists(bin_path):
+                self.get_logger().error(f"Archivos de modelo no encontrados en {self.modelo_dir}")
+                sys.exit(1)
+
+            self.net.load_param(param_path)
+            self.net.load_model(bin_path)
+            self.anchors, self.strides = generate_anchors(
+                strides=[8, 16, 32],
+                grid_sizes=[self.input_size // 8, self.input_size // 16, self.input_size // 32]
+            )
+            self.dfl_weights = np.arange(16, dtype=np.float32).reshape(1, 16, 1)
+            self._inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
+            self._inference_thread.start()
+        else:
+            self.get_logger().info("Usando inferencia externa de la UnitV K210")
 
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -157,6 +169,11 @@ class NodoVision(Node):
             self.image_callback,
             qos_profile
         )
+        self.sub_k210 = None
+        if self.inference_backend == 'k210':
+            self.sub_k210 = self.create_subscription(
+                String, '/k210/detecciones', self._cb_k210_detecciones, 10
+            )
 
         # Publicadores unificados (SPoP)
         self.pub_raw = self.create_publisher(Image, '/camara/video_procesado', qos_profile)
@@ -173,35 +190,30 @@ class NodoVision(Node):
     def _cb_confirmacion(self, msg: Empty):
         self._confirmacion_recibida = True
 
-    def _aplicar_segmentacion(self, frame_bgr, bbox):
-        frame_copia = frame_bgr.copy()
-        x1, y1, x2, y2 = map(int, bbox)
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(frame_copia.shape[1], x2), min(frame_copia.shape[0], y2)
-
-        if (x2 <= x1) or (y2 <= y1):
-            return frame_copia, "OPTIMO"
-
-        roi = frame_copia[y1:y2, x1:x2]
-        roi_hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-
-        mask_dark = cv2.inRange(roi_hsv, np.array([0, 0, 0]), np.array([179, 255, 80]))
-        mask_sat = cv2.inRange(roi_hsv, np.array([0, 100, 0]), np.array([179, 255, 255]))
-        mask_anomalia = cv2.bitwise_or(mask_dark, mask_sat)
-
-        total_pixels = roi.shape[0] * roi.shape[1]
-        anomalia_pixels = np.count_nonzero(mask_anomalia)
-        porcentaje = anomalia_pixels / total_pixels if total_pixels > 0 else 0.0
-
-        estado_limpieza = "OPTIMO" if porcentaje < 0.10 else "ANOMALIA"
-
-        anomalia_bgr = np.zeros_like(roi)
-        anomalia_bgr[mask_anomalia > 0] = [0, 0, 255]
-
-        canvas = cv2.addWeighted(frame_copia, 0.3, np.zeros_like(frame_copia), 0, 0)
-        canvas[y1:y2, x1:x2] = anomalia_bgr
-
-        return canvas, estado_limpieza
+    def _cb_k210_detecciones(self, msg: String):
+        """Recibe la mejor detección calculada dentro de la UnitV."""
+        try:
+            payload = json.loads(msg.data)
+            valid = [
+                det for det in payload.get('detections', [])
+                if det.get('class') in ('bottle', 'can')
+                and float(det.get('confidence', 0.0)) >= self.conf_threshold
+            ]
+            if valid:
+                best = max(valid, key=lambda det: float(det.get('confidence', 0.0)))
+                x, y = float(best['x']), float(best['y'])
+                w, h = float(best['w']), float(best['h'])
+                inference = {
+                    'best_obj': best['class'],
+                    'best_score': float(best['confidence']),
+                    'best_box': np.array([x, y, x + w, y + h], dtype=np.float32),
+                }
+            else:
+                inference = {'best_obj': '', 'best_score': 0.0, 'best_box': None}
+            with self._inference_lock:
+                self._latest_inference = inference
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+            self.get_logger().warn(f"Detección K210 inválida: {exc}", throttle_duration_sec=2.0)
 
     def decode_yolov8(self, raw_output, img_w, img_h, scale_w, scale_h, pad_w, pad_h):
         num_classes = len(self.classes)
@@ -342,7 +354,12 @@ class NodoVision(Node):
             canvas = np.full((self.input_size, self.input_size, 3), 114, dtype=np.uint8)
             canvas[pad_h:pad_h+new_h, pad_w:pad_w+new_w] = resized_img
 
-            mat_in = ncnn.Mat.from_pixels(canvas, ncnn.Mat.PixelType.PIXEL_BGR2RGB, self.input_size, self.input_size)
+            mat_in = self._ncnn.Mat.from_pixels(
+                canvas,
+                self._ncnn.Mat.PixelType.PIXEL_BGR2RGB,
+                self.input_size,
+                self.input_size,
+            )
             mat_in.substract_mean_normalize([0.0, 0.0, 0.0], [1/255.0, 1/255.0, 1/255.0])
 
             ex = self.net.create_extractor()
@@ -381,7 +398,11 @@ class NodoVision(Node):
         scale = min(self.input_size / img_w, self.input_size / img_h)
         
         with self._inference_lock:
-            if self._estado_actual in ['BUSQUEDA', 'ESPERA_RETIRO'] and self._frame_for_inference is None:
+            if (
+                self.inference_backend == 'ncnn'
+                and self._estado_actual in ['BUSQUEDA', 'ESPERA_RETIRO']
+                and self._frame_for_inference is None
+            ):
                 self._frame_for_inference = img.copy()
             best_obj = self._latest_inference["best_obj"]
             best_score = self._latest_inference["best_score"]
@@ -435,42 +456,27 @@ class NodoVision(Node):
                 area = (bx2 - bx1) * (by2 - by1) * self.k_area
                 self._grado_a_publicar = 0.0
 
-                if self._id_congelado == "bottle":
-                    seg_img, estado_limpieza = self._aplicar_segmentacion(self._frame_congelado, self._box_congelado)
-                    if estado_limpieza == "OPTIMO":
-                        self._estado_actual = 'ESPERA_CONFIRMACION'
-                        self._confirmacion_recibida = False
-                        self._ultimo_veredicto = "PROCESAMIENTO EN CURSO|BOTELLA ACEPTADA\n\nPresione CONFIRMAR para procesar.|CONFIRMAR Y GIRAR"
-                        self._grado_a_publicar = 90.0
-                        
-                        self._frozen_seg_img = np.zeros((480, 640, 3), dtype=np.uint8)
-                        self._frozen_seg_img[:] = (0, 150, 0)
-                        text_size = cv2.getTextSize("BOTELLA ACEPTADA", cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3)[0]
-                        text_x = (640 - text_size[0]) // 2
-                        text_y = (480 + text_size[1]) // 2
-                        cv2.putText(self._frozen_seg_img, "BOTELLA ACEPTADA", (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
+                self._estado_actual = 'ESPERA_CONFIRMACION'
+                self._confirmacion_recibida = False
+                clase_str = "LATA" if self._id_congelado == "can" else "BOTELLA"
+                self._ultimo_veredicto = (
+                    f"PROCESAMIENTO EN CURSO|{clase_str} ACEPTADA\n\n"
+                    "Presione CONFIRMAR para procesar.|CONFIRMAR Y GIRAR"
+                )
+                self._grado_a_publicar = -90.0 if self._id_congelado == "can" else 90.0
 
-                    else:
-                        self._estado_actual = 'ESPERA_RETIRO'
-                        self._ultimo_veredicto = "PROCESAMIENTO EN CURSO|BOTELLA RECHAZADA (Sucia)\n\nPor favor, retire el envase de la cámara.|NONE"
-                        msg_grados = Float32()
-                        msg_grados.data = 0.0
-                        self.pub_comando_grados.publish(msg_grados)
-                        
-                        self._frozen_seg_img = seg_img
-                        cv2.rectangle(self._frozen_seg_img, (0, 0), (640, 480), (0, 0, 255), 15)
-                else:
-                    self._estado_actual = 'ESPERA_CONFIRMACION'
-                    self._confirmacion_recibida = False
-                    self._ultimo_veredicto = "PROCESAMIENTO EN CURSO|LATA ACEPTADA\n\nPresione CONFIRMAR para procesar.|CONFIRMAR Y GIRAR"
-                    self._grado_a_publicar = -90.0
-                    
-                    self._frozen_seg_img = np.zeros((480, 640, 3), dtype=np.uint8)
-                    self._frozen_seg_img[:] = (0, 150, 0)
-                    text_size = cv2.getTextSize("LATA ACEPTADA", cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3)[0]
-                    text_x = (640 - text_size[0]) // 2
-                    text_y = (480 + text_size[1]) // 2
-                    cv2.putText(self._frozen_seg_img, "LATA ACEPTADA", (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
+                self._frozen_seg_img = np.zeros((480, 640, 3), dtype=np.uint8)
+                self._frozen_seg_img[:] = (0, 150, 0)
+                texto = f"{clase_str} ACEPTADA"
+                text_size = cv2.getTextSize(
+                    texto, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3
+                )[0]
+                text_x = (640 - text_size[0]) // 2
+                text_y = (480 + text_size[1]) // 2
+                cv2.putText(
+                    self._frozen_seg_img, texto, (text_x, text_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3
+                )
                 
                 out_estado = self._ultimo_veredicto
                 self._frames_vacio = 0
