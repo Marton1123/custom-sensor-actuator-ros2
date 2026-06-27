@@ -1,24 +1,29 @@
 """
 main_launch.py — Orquestador de producción para stepper_control_pkg.
 
-Lanza los cuatro nodos del sistema de clasificación autónoma en el mismo
-proceso de ROS 2 (Jazzy Jalisco):
+Lanza los cinco nodos del sistema de clasificación autónoma con ROS 2
+(Jazzy Jalisco):
     1. nodo_actuadores — control GPIO del motor paso a paso (lgpio).
-    2. nodo_camara     — visión autónoma UVC + inferencia NCNN.
-    3. nodo_gui        — dashboard HMI PyQt6, suscrito a /camara/video_raw.
-    4. nodo_balanza    — lectura de celda de carga HX711, publica /peso_elemento.
+    2. nodo_k210_serial — recibe por USB el video de la cámara OV7740.
+    3. nodo_vision      — inferencia YOLO/NCNN ejecutada en la Raspberry Pi.
+    4. nodo_gui         — dashboard HMI PyQt6.
+    5. nodo_balanza     — lectura de celda de carga HX711.
 
 Uso:
     ros2 launch stepper_control_pkg main_launch.py
 
 Parámetros sobreescribibles en tiempo de lanzamiento:
-    ros2 launch stepper_control_pkg main_launch.py delay_pulso:=0.001
+    ros2 launch stepper_control_pkg main_launch.py \
+        serial_port:=/dev/ttyUSB0 baudrate:=115200
 """
 
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -50,14 +55,19 @@ def generate_launch_description() -> LaunchDescription:
         ],
     )
 
-    nodo_camara = Node(
-        package="stepper_control_pkg",
-        executable="nodo_camara",
-        name="nodo_camara",
+    serial_port = LaunchConfiguration("serial_port")
+    baudrate = LaunchConfiguration("baudrate")
+
+    nodo_k210_serial = Node(
+        package="ros2_vision_pkg",
+        executable="nodo_k210_serial",
+        name="nodo_k210_serial",
         output="screen",
         emulate_tty=True,
-        parameters=[config_path]
-        # /dev/video0 se hereda del entorno; el usuario debe pertenecer al grupo 'video'
+        parameters=[{
+            "serial_port": serial_port,
+            "baudrate": ParameterValue(baudrate, value_type=int),
+        }],
     )
 
     nodo_gui = Node(
@@ -85,13 +95,27 @@ def generate_launch_description() -> LaunchDescription:
         output="screen",
         emulate_tty=True,
         parameters=[{
-            "modelo_dir": os.path.expanduser('~/custom-sensor-actuator-ros2/IA/models/botellas_vs_latas_ncnn')
+            "modelo_dir": os.path.expanduser(
+                "~/custom-sensor-actuator-ros2/IA/models/botellas_vs_latas_ncnn"
+            ),
+            # La K210 sólo entrega imágenes; la inferencia permanece en la Pi.
+            "inference_backend": "ncnn",
         }]
     )
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "serial_port",
+            default_value="/dev/ttyUSB0",
+            description="Puerto USB serie de la UnitV K210",
+        ),
+        DeclareLaunchArgument(
+            "baudrate",
+            default_value="115200",
+            description="Velocidad del flujo JPEG de la UnitV",
+        ),
         nodo_actuadores,
-        nodo_camara,
+        nodo_k210_serial,
         nodo_vision,
         nodo_gui,
         nodo_balanza,

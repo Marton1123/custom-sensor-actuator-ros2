@@ -45,11 +45,14 @@ Antes de entrenar, se puede validar toda la ruta de cámara usando
    ```
 
 4. Conectar el USB-C de la UnitV a un puerto USB de la Raspberry.
-5. Lanzar `k210_system.launch.py`.
+5. Lanzar `main_launch.py`, que usa la K210 como cámara y conserva la
+   inferencia NCNN en la Raspberry.
 
 En esta modalidad se publican `/camara/video_raw` y
-`/camara/video_procesado`, mientras `/k210/detecciones` contiene una lista
-vacía. Por lo tanto, la GUI muestra video pero no clasifica objetos.
+`/camara/video_procesado`. Aunque `/k210/detecciones` contiene una lista
+vacía, no se utiliza para clasificar: `nodo_vision` ejecuta el modelo
+`botellas_vs_latas_ncnn` en la Raspberry, igual que con la cámara UVC
+anterior.
 
 ## 1. Preparar el dataset en el servidor
 
@@ -141,14 +144,16 @@ sudo apt install python3-serial
 cd ~/custom-sensor-actuator-ros2/ros2_ws
 colcon build --symlink-install
 source install/setup.bash
-ros2 launch stepper_control_pkg k210_system.launch.py
+export DISPLAY=:0
+ros2 launch stepper_control_pkg main_launch.py \
+  serial_port:=/dev/ttyUSB0 baudrate:=115200
 ```
 
 Verificar el dispositivo después de conectar la UnitV:
 
 ```bash
 ls -l /dev/ttyUSB0
-ros2 launch stepper_control_pkg k210_system.launch.py \
+ros2 launch stepper_control_pkg main_launch.py \
   serial_port:=/dev/ttyUSB0 baudrate:=115200
 ```
 

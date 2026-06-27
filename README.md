@@ -6,7 +6,10 @@ Sistema embebido de visión computacional y control de hardware diseñado para o
 
 ## Descripción General
 
-El paquete `stepper_control_pkg` implementa una arquitectura modular de responsabilidad única distribuida en cuatro nodos ROS 2 independientes. La lógica de inferencia se ejecuta sobre el motor **NCNN** (redes convolucionales sobre CPU sin dependencia de CUDA), minimizando la huella de memoria y la latencia en sistemas embebidos. La interfaz HMI se desarrolló sobre **PyQt6**, operando como máquina de estados finitos.
+El sistema implementa una arquitectura modular distribuida en nodos ROS 2
+independientes. La UnitV K210 se utiliza como cámara USB-serie y la lógica de
+inferencia continúa ejecutándose sobre **NCNN** en la Raspberry Pi. La interfaz
+HMI se desarrolló sobre **PyQt6**, operando como máquina de estados finitos.
 
 ---
 
@@ -15,7 +18,7 @@ El paquete `stepper_control_pkg` implementa una arquitectura modular de responsa
 | Componente | Modelo / Estándar | Interfaz |
 |---|---|---|
 | Unidad de cómputo | Raspberry Pi 5 (8 GB) | — |
-| Cámara | UVC o M5Stack UnitV K210/OV7740 | USB/V4L2 o UART |
+| Cámara | M5Stack UnitV K210/OV7740 | USB-serie (FTDI) |
 | Sensor de masa | Celda de carga + convertidor HX711 (24-bit ADC) | GPIO bit-banging (gpiozero) |
 | Motor paso a paso | NEMA 17 + controlador pulso/dirección (p. ej. TB6600) | GPIO lgpio — PUL/DIR |
 
@@ -36,8 +39,8 @@ El paquete `stepper_control_pkg` implementa una arquitectura modular de responsa
 
 | Nodo | Archivo | Descripción |
 |---|---|---|
-| `nodo_camara` | `nodo_camara.py` | Captura una cámara UVC y publica video |
-| `nodo_k210_serial` | `nodo_k210_serial.py` | Recibe video JPEG y detecciones desde la UnitV |
+| `nodo_camara` | `nodo_camara.py` | Captura UVC antigua, conservada como alternativa |
+| `nodo_k210_serial` | `nodo_k210_serial.py` | Recibe el video JPEG de la UnitV por USB |
 | `nodo_vision` | `nodo_vision.py` | FSM de clasificación con backend NCNN o K210 |
 | `nodo_gui` | `nodo_gui.py` | Dashboard HMI PyQt6 — visualización pasiva de todos los tópicos |
 | `nodo_balanza` | `nodo_balanza.py` | Lectura del sensor HX711, tara automática, publicación de masa |
@@ -47,10 +50,11 @@ El paquete `stepper_control_pkg` implementa una arquitectura modular de responsa
 
 | Tópico | Tipo de Mensaje | QoS | Publicador | Suscriptor(es) |
 |---|---|---|---|---|
-| `/camara/video_raw` | `sensor_msgs/Image` | BEST\_EFFORT, depth=1 | `nodo_camara` | `nodo_gui` |
-| `/camara/video_segmentado` | `sensor_msgs/Image` | BEST\_EFFORT, depth=1 | `nodo_camara` | `nodo_gui` |
-| `/clasificacion_objeto` | `std_msgs/String` | RELIABLE, depth=10 | `nodo_camara` | `nodo_gui` |
-| `/tamano_estimado` | `std_msgs/Float32` | RELIABLE, depth=10 | `nodo_camara` | `nodo_gui` |
+| `/camara/video_raw` | `sensor_msgs/Image` | BEST\_EFFORT, depth=1 | `nodo_k210_serial` | `nodo_vision` |
+| `/camara/video_procesado` | `sensor_msgs/Image` | BEST\_EFFORT, depth=1 | `nodo_vision` | `nodo_gui` |
+| `/camara/video_segmentado` | `sensor_msgs/Image` | BEST\_EFFORT, depth=1 | `nodo_vision` | `nodo_gui` |
+| `/clasificacion_objeto` | `std_msgs/String` | RELIABLE, depth=10 | `nodo_vision` | `nodo_gui` |
+| `/tamano_estimado` | `std_msgs/Float32` | RELIABLE, depth=10 | `nodo_vision` | `nodo_gui` |
 | `/peso_elemento` | `std_msgs/Float32` | RELIABLE, depth=10 | `nodo_balanza` | `nodo_gui` |
 | `/comando_grados` | `std_msgs/Float32` | RELIABLE, depth=10 | `nodo_gui` *(externo)* | `nodo_actuadores` |
 | `/comando_motor` | `std_msgs/Int32` | RELIABLE, depth=10 | *(externo)* | `nodo_actuadores` |
@@ -58,13 +62,17 @@ El paquete `stepper_control_pkg` implementa una arquitectura modular de responsa
 ### Diagrama de Flujo de Datos
 
 ```
-[Cámara UVC]──▶ nodo_camara ──▶ /camara/video_raw        ──▶┐
-                     │         /camara/video_segmentado   ──▶│
-                     │         /clasificacion_objeto       ──▶│── nodo_gui ──▶ [Pantalla HMI]
-                     └───────▶ /tamano_estimado            ──▶│
-[HX711]──────▶ nodo_balanza ──▶ /peso_elemento             ──▶┘
+[UnitV/OV7740] ─USB─▶ nodo_k210_serial ─▶ /camara/video_raw
+                                                   │
+                                                   ▼
+                                      nodo_vision (YOLO/NCNN en Pi)
+                                                   │
+                              /camara/video_procesado
+                              /camara/video_segmentado
+                              /clasificacion_objeto ───────▶ nodo_gui ─▶ [Pantalla HMI]
 
-[nodo_gui / CLI] ──▶ /comando_grados ──▶ nodo_actuadores ──▶ [Motor Paso a Paso]
+[HX711] ─▶ nodo_balanza ─▶ /peso_elemento ─────────────────▶ nodo_gui
+[nodo_gui / CLI] ─▶ /comando_grados ─▶ nodo_actuadores ────▶ [Motor]
 ```
 
 ---
@@ -74,7 +82,7 @@ El paquete `stepper_control_pkg` implementa una arquitectura modular de responsa
 ### Dependencias del Sistema Operativo
 
 ```bash
-sudo apt install python3-lgpio python3-gpiozero
+sudo apt install python3-lgpio python3-gpiozero python3-serial
 sudo apt install ros-jazzy-cv-bridge ros-jazzy-sensor-msgs
 pip install ncnn PyQt6
 ```
@@ -117,10 +125,12 @@ source install/setup.bash
 ### Lanzamiento del Sistema Completo
 
 ```bash
-# Cámara UVC + YOLOv8/NCNN en Raspberry
-ros2 launch stepper_control_pkg main_launch.py
+# UnitV K210 como cámara + YOLOv8/NCNN en Raspberry
+export DISPLAY=:0
+ros2 launch stepper_control_pkg main_launch.py \
+  serial_port:=/dev/ttyUSB0 baudrate:=115200
 
-# UnitV K210 + YOLOv2 en la cámara
+# Alternativa futura: YOLOv2 cuantizado ejecutado en la K210
 ros2 launch stepper_control_pkg k210_system.launch.py
 ```
 

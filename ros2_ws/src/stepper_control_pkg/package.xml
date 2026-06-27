@@ -17,6 +17,8 @@
   <!-- Dependencias en runtime -->
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
+  <exec_depend>ros2_vision_pkg</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
 
   <!-- Dependencias de test -->
   <test_depend>ament_copyright</test_depend>
