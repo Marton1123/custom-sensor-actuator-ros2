@@ -5,3 +5,7 @@ nodo_balanza:
 nodo_camara:
   ros__parameters:
     distancia_camara_cm: 60.0
+
+nodo_actuadores:
+  ros__parameters:
+    tiempo_motor: 3.8

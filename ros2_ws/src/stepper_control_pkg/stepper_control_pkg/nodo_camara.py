@@ -50,90 +50,99 @@ class NodoCamara(Node):
         self.device_index = self.get_parameter("device_index").value
 
         self._fallos_consecutivos = 0
-        self._ultimo_frame = None
+        self._captura = None
+        self._running = True
         self._lock = threading.Lock()
+        
+        # Iniciar cámara por primera vez
         self._captura = self._abrir_camara()
         
-        # Hilo de lectura asincrona
-        threading.Thread(target=self._leer_camara_continuamente, daemon=True).start()
-
-        self._timer   = self.create_timer(TIMER_PERIOD, self._publicar_frame)
-
-    # -- Hilo de Lectura ---------------------------------------------------
-
-    def _leer_camara_continuamente(self) -> None:
-        """Lee continuamente de la camara para mantener vacio el buffer V4L2."""
-        while rclpy.ok():
-            if self._captura is not None and self._captura.isOpened():
-                ret, frame = self._captura.read()
-                with self._lock:
-                    if ret:
-                        # Si tu cámara requiere rotación por su montura física, hazlo aquí.
-                        # Por defecto dejaremos sin rotación. Si necesitas rotar 90 grados:
-                        frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-                        self._ultimo_frame = frame.copy()
-                    else:
-                        self._ultimo_frame = None
+        # Hilo de lectura y publicación asíncrona
+        self._thread = threading.Thread(target=self._leer_y_publicar_continuamente, daemon=True)
+        self._thread.start()
 
     # -- Apertura / reapertura de camara -----------------------------------
 
     def _abrir_camara(self) -> cv2.VideoCapture:
-        """Intenta abrir la camara iterando sobre puertos 0-5 para evitar nodos de metadatos V4L2."""
+        """Intenta abrir la cámara en el índice configurado (device_index), reintentando si está ocupado por procesos anteriores."""
         import time
-        for i in range(6):
-            cap = cv2.VideoCapture(f'/dev/video{i}', cv2.CAP_V4L2)
+        device_path = f'/dev/video{self.device_index}'
+        
+        for intento in range(5):
+            if not os.path.exists(device_path):
+                self.get_logger().warn(f"El dispositivo {device_path} no existe en el sistema. Reintentando...")
+                time.sleep(1.0)
+                continue
+                
+            cap = cv2.VideoCapture(device_path, cv2.CAP_V4L2)
             if cap.isOpened():
-                for _ in range(3):  # Give the camera a moment to warm up
-                    ret, frame = cap.read()
-                    if ret and frame is not None:
-                        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                        self._fallos_consecutivos = 0
-                        
-                        real_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-                        real_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-                        self.get_logger().info(f"Cámara conectada exitosamente en el puerto /dev/video{i} ({int(real_w)}x{int(real_h)})")
-                        self.device_index = i
-                        return cap
-                    time.sleep(0.1)
+                # Configurar propiedades antes de intentar leer
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                
+                time.sleep(0.3)  # Espera para estabilizar el sensor físico
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    real_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+                    real_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                    self.get_logger().info(f"Cámara conectada exitosamente en {device_path} ({int(real_w)}x{int(real_h)})")
+                    self._fallos_consecutivos = 0
+                    return cap
                 cap.release()
             else:
                 cap.release()
                 
-        self.get_logger().error("No se encontró ninguna cámara de captura de video válida en los puertos 0-5")
+            self.get_logger().warn(f"El puerto {device_path} está ocupado o inicializándose (intento {intento+1}/5). Esperando 1s...")
+            time.sleep(1.0)
+            
+        self.get_logger().error(f"No se pudo abrir la cámara en {device_path} tras 5 intentos.")
         return None
 
     def _reconectar_camara(self) -> None:
         """Cierra el handle actual y reabre usando _abrir_camara()."""
-        if self._captura is not None:
-            self._captura.release()
-            self._captura = None
-        self._captura = self._abrir_camara()
-
-    # -- Ciclo Principal (Timer a 30 FPS) ----------------------------------
-
-    def _publicar_frame(self) -> None:
-        """Extrae el fotograma del hilo daemon y lo publica localmente."""
         with self._lock:
-            frame = self._ultimo_frame
-            self._ultimo_frame = None
+            if self._captura is not None:
+                self._captura.release()
+                self._captura = None
+            self._captura = self._abrir_camara()
 
-        if frame is None:
-            self._fallos_consecutivos += 1
-            if self._fallos_consecutivos % 10 == 0:
-                self.get_logger().warn(
-                    f"Camara no disponible. Intentando reconexion (fallos: {self._fallos_consecutivos})..."
-                )
-            if self._fallos_consecutivos > MAX_FALLOS_CONSECUTIVOS:
+    # -- Hilo Principal de Lectura y Publicación Directa -------------------
+
+    def _leer_y_publicar_continuamente(self) -> None:
+        """Lee de la cámara y publica directamente para minimizar latencia y consumo de CPU."""
+        import time
+        while rclpy.ok() and self._running:
+            with self._lock:
+                cap = self._captura
+            
+            if cap is not None and cap.isOpened():
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    self._fallos_consecutivos = 0
+                    
+                    # Rotar si es necesario (montura física de 90 grados)
+                    frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+                    
+                    try:
+                        msg_img = self._bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+                        self._pub.publish(msg_img)
+                    except Exception as e:
+                        self.get_logger().error(f"Error al publicar frame: {e}")
+                else:
+                    self._fallos_consecutivos += 1
+                    if self._fallos_consecutivos % 10 == 0:
+                        self.get_logger().warn(
+                            f"Fallo al leer frame ({self._fallos_consecutivos}/{MAX_FALLOS_CONSECUTIVOS})"
+                        )
+                    
+                    if self._fallos_consecutivos >= MAX_FALLOS_CONSECUTIVOS:
+                        self.get_logger().error("Demasiados fallos de lectura consecutivos. Reconectando cámara...")
+                        self._reconectar_camara()
+                    time.sleep(0.05)  # Evitar bucle sin fin consumiendo CPU
+            else:
+                time.sleep(1.0)
                 self._reconectar_camara()
-            return
-
-        self._fallos_consecutivos = 0
-
-        # Publicar crudo a /camara/video_raw para que nodo_vision procese
-        msg_img = self._bridge.cv2_to_imgmsg(frame, encoding="bgr8")
-        self._pub.publish(msg_img)
 
 
 def main(args=None) -> None:
@@ -144,8 +153,10 @@ def main(args=None) -> None:
     except KeyboardInterrupt:
         nodo.get_logger().info("Cancelado por KeyboardInterrupt.")
     finally:
-        if nodo._captura:
-            nodo._captura.release()
+        nodo._running = False
+        with nodo._lock:
+            if nodo._captura:
+                nodo._captura.release()
         nodo.destroy_node()
         rclpy.shutdown()
 

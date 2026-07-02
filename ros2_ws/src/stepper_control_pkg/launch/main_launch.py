@@ -40,12 +40,9 @@ def generate_launch_description() -> LaunchDescription:
         output="screen",
         emulate_tty=True,
         parameters=[
+            config_path,
             {
                 "gpio_chip":     4,       # /dev/gpiochip4 en RPi5
-                "pin_step":      17,      # PUL+ -> GPIO 17
-                "pin_dir":       27,      # DIR+ -> GPIO 27
-                "pasos_por_rev": 3200,    # 1/16 microstepping en TB6600
-                "delay_pulso":   0.0005,  # ~18.75 RPM
             }
         ],
     )
