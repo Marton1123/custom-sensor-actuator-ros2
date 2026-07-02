@@ -34,36 +34,39 @@ El paquete `stepper_control_pkg` implementa una arquitectura modular de responsa
 
 ### Nodos del Sistema
 
-| Nodo | Archivo | Descripción |
-|---|---|---|
-| `nodo_camara` | `nodo_camara.py` | Captura UVC + inferencia NCNN (YOLOv8) + análisis HSV de anomalías |
-| `nodo_gui` | `nodo_gui.py` | Dashboard HMI PyQt6 — visualización pasiva de todos los tópicos |
-| `nodo_balanza` | `nodo_balanza.py` | Lectura del sensor HX711, tara automática, publicación de masa |
-| `nodo_actuadores` | `nodo_actuadores.py` | Control GPIO del motor paso a paso vía lgpio |
+| Nodo | Paquete | Archivo | Descripción |
+|---|---|---|---|
+| `nodo_camara` | `stepper_control_pkg` | `nodo_camara.py` | Captura fotogramas desde la cámara UVC y los publica de forma continua para minimizar latencia. |
+| `nodo_vision` | `ros2_vision_pkg` | `nodo_vision.py` | Inferencia YOLOv8 NCNN (2 clases: can/bottle), máquina de estados del proyecto y visualización del veredicto. *(Nota: La verificación de botellas sucias está desactivada temporalmente).* |
+| `nodo_gui` | `stepper_control_pkg` | `nodo_gui.py` | Interfaz gráfica HMI en PyQt6 para visualizar la cámara procesada, estado y control. |
+| `nodo_balanza` | `stepper_control_pkg` | `nodo_balanza.py` | Interfaz con la celda de carga HX711 para pesar los envases. |
+| `nodo_actuadores` | `stepper_control_pkg` | `nodo_actuadores.py` | Control de giro de los motores DC mediante puente H L298N. Alterna la dirección según si es lata (Dirección 2) o botella (Dirección 1). |
 
 ### Tópicos de Comunicación (Pub/Sub)
 
 | Tópico | Tipo de Mensaje | QoS | Publicador | Suscriptor(es) |
 |---|---|---|---|---|
-| `/camara/video_raw` | `sensor_msgs/Image` | BEST\_EFFORT, depth=1 | `nodo_camara` | `nodo_gui` |
-| `/camara/video_segmentado` | `sensor_msgs/Image` | BEST\_EFFORT, depth=1 | `nodo_camara` | `nodo_gui` |
-| `/clasificacion_objeto` | `std_msgs/String` | RELIABLE, depth=10 | `nodo_camara` | `nodo_gui` |
-| `/tamano_estimado` | `std_msgs/Float32` | RELIABLE, depth=10 | `nodo_camara` | `nodo_gui` |
+| `/camara/video_raw` | `sensor_msgs/Image` | BEST\_EFFORT, depth=1 | `nodo_camara` | `nodo_vision` |
+| `/camara/video_procesado` | `sensor_msgs/Image` | BEST\_EFFORT, depth=1 | `nodo_vision` | `nodo_gui` |
+| `/camara/video_segmentado` | `sensor_msgs/Image` | BEST\_EFFORT, depth=1 | `nodo_vision` | `nodo_gui` |
+| `/clasificacion_objeto` | `std_msgs/String` | RELIABLE, depth=10 | `nodo_vision` | `nodo_gui` |
+| `/tamano_estimado` | `std_msgs/Float32` | RELIABLE, depth=10 | `nodo_vision` | `nodo_gui` |
+| `/comando_grados` | `std_msgs/Float32` | RELIABLE, depth=10 | `nodo_vision` / `nodo_gui` | `nodo_actuadores` |
 | `/peso_elemento` | `std_msgs/Float32` | RELIABLE, depth=10 | `nodo_balanza` | `nodo_gui` |
-| `/comando_grados` | `std_msgs/Float32` | RELIABLE, depth=10 | `nodo_gui` *(externo)* | `nodo_actuadores` |
-| `/comando_motor` | `std_msgs/Int32` | RELIABLE, depth=10 | *(externo)* | `nodo_actuadores` |
 
 ### Diagrama de Flujo de Datos
 
 ```
-[Cámara UVC]──▶ nodo_camara ──▶ /camara/video_raw        ──▶┐
-                     │         /camara/video_segmentado   ──▶│
-                     │         /clasificacion_objeto       ──▶│── nodo_gui ──▶ [Pantalla HMI]
-                     └───────▶ /tamano_estimado            ──▶│
-[HX711]──────▶ nodo_balanza ──▶ /peso_elemento             ──▶┘
-
-[nodo_gui / CLI] ──▶ /comando_grados ──▶ nodo_actuadores ──▶ [Motor Paso a Paso]
+[Cámara UVC] ──▶ nodo_camara ──▶ /camara/video_raw ──▶ nodo_vision ──▶ /camara/video_procesado  ──▶┐
+                                                            │      ──▶ /camara/video_segmentado ──▶│
+                                                            │      ──▶ /clasificacion_objeto    ──▶│── nodo_gui ──▶ [Pantalla HMI]
+                                                            │      ──▶ /tamano_estimado         ──▶│
+                                                            └──────▶ /comando_grados ──▶┐          │
+                                                                                        ▼          │
+[HX711] ───────▶ nodo_balanza ──▶ /peso_elemento ──────────────────────────────────────────────────┘
+                                                                           nodo_actuadores ──▶ [Motores L298N]
 ```
+
 
 ---
 
@@ -144,6 +147,28 @@ ros2 topic echo /peso_elemento
 ros2 topic echo /tamano_estimado
 ```
 
+### Scripts Utilitarios de Calibración y Lanzamiento
+
+* **Ejecutar el proyecto en la Raspberry Pi:**
+  ```bash
+  /home/lab-ros/ejecutar_proyecto.sh
+  ```
+  *(Este script detiene ejecuciones previas colgadas, configura la orientación vertical de la pantalla y lanza todo el ecosistema de ROS 2).*
+
+* **Calibrar el giro y dirección de los motores:**
+  ```bash
+  # Probar giro por 3.7 segundos en Dirección 1 (Dirección para Botellas)
+  python3 calibrar_dos_motores.py 3.7 1
+
+  # Probar giro por 3.7 segundos en Dirección 2 (Dirección para Latas)
+  python3 calibrar_dos_motores.py 3.7 2
+  ```
+
+* **Detener motores inmediatamente en caso de emergencia:**
+  ```bash
+  python3 detener_motor.py
+  ```
+
 ---
 
 ## Configuración de Parámetros (YAML)
@@ -178,20 +203,29 @@ custom-sensor-actuator-ros2/
 ├── IA/
 │   ├── dataset_and_training/          # Scripts de entrenamiento y datasets
 │   └── models/
-│       └── botellas_ncnn_model/       # Modelo exportado a NCNN (.bin + .param)
+│       └── botellas_vs_latas_ncnn/    # Modelo exportado a NCNN (.bin + .param)
 ├── ros2_ws/
 │   └── src/
-│       └── stepper_control_pkg/
+│       ├── ros2_vision_pkg/           # Paquete de visión de ROS 2
+│       │   ├── ros2_vision_pkg/
+│       │   │   ├── nodo_vision.py     # Nodo de inferencia YOLOv8 y máquina de estados
+│       │   │   └── segmentacion_respaldo.py # Respaldo del segmentador HSV (botella sucia)
+│       │   └── package.xml
+│       └── stepper_control_pkg/       # Paquete de control y GUI de ROS 2
 │           ├── config/
 │           │   └── parametros.yaml    # Parámetros YAML del sistema
 │           ├── launch/
-│           │   └── main_launch.py     # Orquestador de producción
-│           ├── stepper_control_pkg/   # Ejecutables Python (Nodos ROS 2)
-│           │   ├── nodo_actuadores.py
-│           │   ├── nodo_balanza.py
-│           │   ├── nodo_camara.py
-│           │   └── nodo_gui.py
-│           ├── package.xml            # Manifiesto de dependencias ROS 2
-│           └── setup.py              # Registro de entry points
+│           │   └── main_launch.py     # Orquestador de lanzamiento (5 nodos)
+│           ├── stepper_control_pkg/   # Nodos Python de ROS 2
+│           │   ├── nodo_actuadores.py # Control de dirección de motores L298N
+│           │   ├── nodo_balanza.py    # Peso HX711
+│           │   ├── nodo_camara.py     # Publicador de frames (bajo consumo)
+│           │   └── nodo_gui.py        # Dashboard visual PyQt6
+│           └── package.xml
+├── calibrar_dos_motores.py            # Utilitario para pruebas de giro y sentido de motores
+├── calibrar_tiempo.py                 # Utilitario para calibrar tiempos de ejecución
+├── detener_motor.py                   # Script de apagado de emergencia de motores
+├── ejecutar_proyecto.sh               # Script principal de lanzamiento del kiosco
+├── ejecutar_proyecto.desktop         # Acceso directo para escritorio GNOME
 └── README.md
 ```
