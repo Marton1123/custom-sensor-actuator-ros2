@@ -110,13 +110,6 @@ class NodoVision(Node):
         self._ultimo_estado_publicado = ""
         self._tiempo_retiro = None
         
-        # Hilo de inferencia
-        self._inference_lock = threading.Lock()
-        self._frame_for_inference = None
-        self._latest_inference = {"best_obj": "", "best_score": 0.0, "best_box": None}
-        self._inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
-        self._inference_thread.start()
-        
         # Pre-allocate canvas
         self._canvas_espera = np.zeros((480, 640, 3), dtype=np.uint8)
         self._canvas_analizando = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -136,6 +129,13 @@ class NodoVision(Node):
 
         self.net.load_param(param_path)
         self.net.load_model(bin_path)
+        
+        # Hilo de inferencia (iniciar solo después de cargar completamente el modelo)
+        self._inference_lock = threading.Lock()
+        self._frame_for_inference = None
+        self._latest_inference = {"best_obj": "", "best_score": 0.0, "best_box": None}
+        self._inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
+        self._inference_thread.start()
 
         self.anchors, self.strides = generate_anchors(
             strides=[8, 16, 32], 
@@ -173,35 +173,7 @@ class NodoVision(Node):
     def _cb_confirmacion(self, msg: Empty):
         self._confirmacion_recibida = True
 
-    def _aplicar_segmentacion(self, frame_bgr, bbox):
-        frame_copia = frame_bgr.copy()
-        x1, y1, x2, y2 = map(int, bbox)
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(frame_copia.shape[1], x2), min(frame_copia.shape[0], y2)
 
-        if (x2 <= x1) or (y2 <= y1):
-            return frame_copia, "OPTIMO"
-
-        roi = frame_copia[y1:y2, x1:x2]
-        roi_hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-
-        mask_dark = cv2.inRange(roi_hsv, np.array([0, 0, 0]), np.array([179, 255, 80]))
-        mask_sat = cv2.inRange(roi_hsv, np.array([0, 100, 0]), np.array([179, 255, 255]))
-        mask_anomalia = cv2.bitwise_or(mask_dark, mask_sat)
-
-        total_pixels = roi.shape[0] * roi.shape[1]
-        anomalia_pixels = np.count_nonzero(mask_anomalia)
-        porcentaje = anomalia_pixels / total_pixels if total_pixels > 0 else 0.0
-
-        estado_limpieza = "OPTIMO" if porcentaje < 0.10 else "ANOMALIA"
-
-        anomalia_bgr = np.zeros_like(roi)
-        anomalia_bgr[mask_anomalia > 0] = [0, 0, 255]
-
-        canvas = cv2.addWeighted(frame_copia, 0.3, np.zeros_like(frame_copia), 0, 0)
-        canvas[y1:y2, x1:x2] = anomalia_bgr
-
-        return canvas, estado_limpieza
 
     def decode_yolov8(self, raw_output, img_w, img_h, scale_w, scale_h, pad_w, pad_h):
         num_classes = len(self.classes)
@@ -436,29 +408,17 @@ class NodoVision(Node):
                 self._grado_a_publicar = 0.0
 
                 if self._id_congelado == "bottle":
-                    seg_img, estado_limpieza = self._aplicar_segmentacion(self._frame_congelado, self._box_congelado)
-                    if estado_limpieza == "OPTIMO":
-                        self._estado_actual = 'ESPERA_CONFIRMACION'
-                        self._confirmacion_recibida = False
-                        self._ultimo_veredicto = "PROCESAMIENTO EN CURSO|BOTELLA ACEPTADA\n\nPresione CONFIRMAR para procesar.|CONFIRMAR Y GIRAR"
-                        self._grado_a_publicar = 90.0
-                        
-                        self._frozen_seg_img = np.zeros((480, 640, 3), dtype=np.uint8)
-                        self._frozen_seg_img[:] = (0, 150, 0)
-                        text_size = cv2.getTextSize("BOTELLA ACEPTADA", cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3)[0]
-                        text_x = (640 - text_size[0]) // 2
-                        text_y = (480 + text_size[1]) // 2
-                        cv2.putText(self._frozen_seg_img, "BOTELLA ACEPTADA", (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
-
-                    else:
-                        self._estado_actual = 'ESPERA_RETIRO'
-                        self._ultimo_veredicto = "PROCESAMIENTO EN CURSO|BOTELLA RECHAZADA (Sucia)\n\nPor favor, retire el envase de la cámara.|NONE"
-                        msg_grados = Float32()
-                        msg_grados.data = 0.0
-                        self.pub_comando_grados.publish(msg_grados)
-                        
-                        self._frozen_seg_img = seg_img
-                        cv2.rectangle(self._frozen_seg_img, (0, 0), (640, 480), (0, 0, 255), 15)
+                    self._estado_actual = 'ESPERA_CONFIRMACION'
+                    self._confirmacion_recibida = False
+                    self._ultimo_veredicto = "PROCESAMIENTO EN CURSO|BOTELLA ACEPTADA\n\nPresione CONFIRMAR para procesar.|CONFIRMAR Y GIRAR"
+                    self._grado_a_publicar = 90.0
+                    
+                    self._frozen_seg_img = np.zeros((480, 640, 3), dtype=np.uint8)
+                    self._frozen_seg_img[:] = (0, 150, 0)
+                    text_size = cv2.getTextSize("BOTELLA ACEPTADA", cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3)[0]
+                    text_x = (640 - text_size[0]) // 2
+                    text_y = (480 + text_size[1]) // 2
+                    cv2.putText(self._frozen_seg_img, "BOTELLA ACEPTADA", (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
                 else:
                     self._estado_actual = 'ESPERA_CONFIRMACION'
                     self._confirmacion_recibida = False
@@ -491,7 +451,7 @@ class NodoVision(Node):
                 msg_grados.data = self._grado_a_publicar
                 self.pub_comando_grados.publish(msg_grados)
                 self._frames_vacio = 0
-                self._ultimo_veredicto = "MOVIMIENTO MECÁNICO|Procesando...\nPor favor, retire el envase.|NONE"
+                self._ultimo_veredicto = "MOVIMIENTO MECÁNICO|Procesando envase...|NONE"
                 self._confirmacion_recibida = False
 
         elif self._estado_actual == 'ESPERA_RETIRO':
@@ -509,17 +469,12 @@ class NodoVision(Node):
             cv2.putText(out_raw, f"RETIRE {clase_str}", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
             
             if self._frames_vacio >= 10:
-                self._estado_actual = 'ESPERA_RETORNO'
-                self._confirmacion_recibida = False
-                self._ultimo_veredicto = "MOVIMIENTO MECÁNICO|Mecanismo liberado y listo.\nPor favor, aleje las manos y presione LIBERAR.|LIBERAR MECANISMO"
+                # Retorna directamente al reseteo (sin esperar confirmaciones de retorno)
+                self._estado_actual = 'RESETEO'
 
         elif self._estado_actual == 'ESPERA_RETORNO':
-            out_seg = self._frozen_seg_img.copy()
-            out_estado = self._ultimo_veredicto
-            
-            if self._confirmacion_recibida:
-                self._estado_actual = 'RESETEO'
-                self._confirmacion_recibida = False
+            # Se salta automáticamente por compatibilidad gráfica
+            self._estado_actual = 'RESETEO'
 
         elif self._estado_actual == 'RESETEO':
             self._estado_actual = 'BUSQUEDA'

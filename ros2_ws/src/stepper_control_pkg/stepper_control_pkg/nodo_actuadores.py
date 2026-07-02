@@ -2,19 +2,16 @@
 """
 nodo_actuadores.py
 ==================
-Nodo ROS 2 que controla un motor DC con caja reductora mediante
-el driver L298N (Puente H), usando lgpio sobre /dev/gpiochip4 (Raspberry Pi 5).
+Nodo ROS 2 que controla dos motores DC simultáneamente mediante el driver L298N (Puente H),
+usando lgpio sobre /dev/gpiochip4 (Raspberry Pi 5).
 
 Tópicos de suscripción:
-    /comando_grados (std_msgs/Float32) → Lógica de estados (BOTELLA, LATA, CENTRO)
-    /objeto_detectado (std_msgs/String) → Lógica de IA (bottle, can)
+    /comando_grados (std_msgs/Float32) → Lógica de control (90.0 para dirección Botella, -90.0 para dirección Lata)
+    /objeto_detectado (std_msgs/String) → Lógica de IA ("bottle" para dirección Botella, "can" para dirección Lata)
 
 Conexiones L298N → Raspberry Pi 5 (BCM):
-    IN1 → GPIO 18
-    IN2 → GPIO 23
-
-Hardware : Raspberry Pi 5 — Ubuntu 24.04
-GPIO lib : lgpio  (sudo apt install python3-lgpio)
+    Motor 1 (Motor A): IN1 → GPIO 18, IN2 → GPIO 23
+    Motor 2 (Motor B): IN3 → GPIO 25, IN4 → GPIO 26
 """
 
 import time
@@ -36,8 +33,8 @@ from std_msgs.msg import Float32, String
 
 class NodoActuadores(Node):
     """
-    Nodo suscriptor de comandos de movimiento para Motor DC / L298N.
-    Mantiene estado y usa control por tiempo.
+    Nodo suscriptor de comandos de movimiento simultáneo para dos Motores DC / L298N.
+    Se activa por tiempo (segundos) y frena ambos automáticamente.
     """
 
     TOPIC_COMANDO_GRADOS = "/comando_grados"
@@ -57,15 +54,15 @@ class NodoActuadores(Node):
         self._gpio_chip = self.get_parameter("gpio_chip").get_parameter_value().integer_value
         
         # Pines del L298N
+        # Motor 1 (Motor A)
         self.IN1 = 18
         self.IN2 = 23
-        self.pin_sensor_centro = 24
+        # Motor 2 (Motor B)
+        self.IN3 = 25
+        self.IN4 = 26
 
-        # Configuración de tiempo
-        self.declare_parameter("tiempo_90_grados", 0.4)
-
-        # Estado del motor
-        self.posicion_actual = "CENTRO"  # "CENTRO", "BOTELLA", "LATA"
+        # Configuración de tiempo de funcionamiento simultáneo (en segundos)
+        self.declare_parameter("tiempo_motor", 4.7)
 
         # ── Estado del hilo de movimiento ──────────────────────────────────
         self._hilo_motor: threading.Thread | None = None
@@ -99,48 +96,41 @@ class NodoActuadores(Node):
 
         self.get_logger().info(
             f"NodoActuadores listo\n"
-            f"  GPIO   : gpiochip{self._gpio_chip} | IN1=GPIO{self.IN1} | IN2=GPIO{self.IN2}\n"
-            f"  Tiempo : {self.get_parameter('tiempo_90_grados').value} s\n"
-            f"  Topics : '{self.TOPIC_COMANDO_GRADOS}'"
+            f"  GPIO     : gpiochip{self._gpio_chip}\n"
+            f"  Motor 1  : IN1=GPIO{self.IN1} | IN2=GPIO{self.IN2}\n"
+            f"  Motor 2  : IN3=GPIO{self.IN3} | IN4=GPIO{self.IN4}\n"
+            f"  Tiempo   : {self.get_parameter('tiempo_motor').value} s\n"
+            f"  Topics   : '{self.TOPIC_COMANDO_GRADOS}' y '/objeto_detectado'"
         )
 
     def _init_gpio(self) -> int:
         handle = lgpio.gpiochip_open(self._gpio_chip)
         lgpio.gpio_claim_output(handle, self.IN1, 0)
         lgpio.gpio_claim_output(handle, self.IN2, 0)
-        lgpio.gpio_claim_input(handle, self.pin_sensor_centro, lgpio.SET_PULL_UP)
+        lgpio.gpio_claim_output(handle, self.IN3, 0)
+        lgpio.gpio_claim_output(handle, self.IN4, 0)
         self.get_logger().info(
             f"GPIO OK → /dev/gpiochip{self._gpio_chip} | "
-            f"IN1=GPIO{self.IN1} IN2=GPIO{self.IN2} Sensor=GPIO{self.pin_sensor_centro}"
+            f"Motor 1: IN1=GPIO{self.IN1} IN2=GPIO{self.IN2} | "
+            f"Motor 2: IN3=GPIO{self.IN3} IN4=GPIO{self.IN4}"
         )
         return handle
 
-    def _leer_sensor_centro(self) -> bool:
-        return lgpio.gpio_read(self._h, self.pin_sensor_centro) == 0
-
     def _cb_comando_grados(self, msg: Float32) -> None:
         """
-        Lógica de control de estados en base al comando en grados.
+        Lógica de activación por comandos en grados.
         """
         comando = msg.data
         self.get_logger().info(f"[/comando_grados] Recibido: {comando}")
         
-        if self.posicion_actual == "ERROR":
-            self.get_logger().warning("Intervencion manual requerida: Mecanismo en estado de ERROR. Comando ignorado.")
-            return
-
-        accion = ""
         if comando == 90.0:
-            accion = "A_BOTELLA"
+            self._lanzar_movimiento("GIRAR_BOTELLA")
         elif comando == -90.0:
-            accion = "A_LATA"
+            self._lanzar_movimiento("GIRAR_LATA")
         elif comando == 0.0:
-            accion = "RESET"
+            self.get_logger().info("Reset/Centro recibido (se ignora en control simple por tiempo).")
         else:
             self.get_logger().warning(f"Comando desconocido: {comando}")
-            return
-
-        self._lanzar_movimiento(accion)
 
     def _cb_objeto_detectado(self, msg: String) -> None:
         """
@@ -151,11 +141,11 @@ class NodoActuadores(Node):
             return
             
         if objeto == "bottle":
-            self.get_logger().info("[IA] Botella detectada.")
-            self._lanzar_movimiento("A_BOTELLA")
+            self.get_logger().info("[IA] BOTELLA detectada -> Activando ambos motores (Dirección 1).")
+            self._lanzar_movimiento("GIRAR_BOTELLA")
         elif objeto == "can":
-            self.get_logger().info("[IA] Lata detectada.")
-            self._lanzar_movimiento("A_LATA")
+            self.get_logger().info("[IA] LATA detectada -> Activando ambos motores (Dirección 2).")
+            self._lanzar_movimiento("GIRAR_LATA")
 
     def _lanzar_movimiento(self, accion: str) -> None:
         """
@@ -175,78 +165,34 @@ class NodoActuadores(Node):
                 target=self._ejecutar_accion,
                 args=(accion,),
                 daemon=True,
-                name=f"motor_{accion}",
+                name=f"motores_{accion}",
             )
             self._hilo_motor.start()
 
     def _ejecutar_accion(self, accion: str) -> None:
         """
-        Ejecuta la acción solicitada respetando la máquina de estados.
+        Ejecuta el giro de ambos motores de forma simultánea.
         """
-        tiempo_90_grados = self.get_parameter('tiempo_90_grados').value
+        tiempo = self.get_parameter('tiempo_motor').value
 
-        if accion == "A_BOTELLA":
-            if self.posicion_actual == "CENTRO":
-                self.get_logger().info("Moviendo a BOTELLA (IN1=1, IN2=0)")
-                self._activar_motor(1, 0, tiempo_90_grados)
-                self.posicion_actual = "BOTELLA"
-            else:
-                self.get_logger().info(f"Ignorado. Estado actual: {self.posicion_actual}")
+        if accion == "GIRAR_BOTELLA":
+            self.get_logger().info(f"Girando ambos motores a dirección BOTELLA (Dirección 1) por {tiempo}s...")
+            self._activar_motores(1, 0, 1, 0, tiempo)
+            self.get_logger().info("Giro completado.")
+        elif accion == "GIRAR_LATA":
+            self.get_logger().info(f"Girando ambos motores a dirección LATA (Dirección 2) por {tiempo}s...")
+            self._activar_motores(0, 1, 0, 1, tiempo)
+            self.get_logger().info("Giro completado.")
 
-        elif accion == "A_LATA":
-            if self.posicion_actual == "CENTRO":
-                self.get_logger().info("Moviendo a LATA (IN1=0, IN2=1)")
-                self._activar_motor(0, 1, tiempo_90_grados)
-                self.posicion_actual = "LATA"
-            else:
-                self.get_logger().info(f"Ignorado. Estado actual: {self.posicion_actual}")
-
-        elif accion == "RESET":
-            if self.posicion_actual == "BOTELLA":
-                self.get_logger().info("Retornando desde BOTELLA")
-                self._retornar_a_centro(0, 1)
-            elif self.posicion_actual == "LATA":
-                self.get_logger().info("Retornando desde LATA")
-                self._retornar_a_centro(1, 0)
-            elif self.posicion_actual == "CENTRO":
-                self.get_logger().info("Ya en CENTRO. No hace nada.")
-
-    def _retornar_a_centro(self, in1_val: int, in2_val: int) -> None:
-        lgpio.gpio_write(self._h, self.IN1, in1_val)
-        lgpio.gpio_write(self._h, self.IN2, in2_val)
-        
-        inicio = time.time()
-        timeout_maximo = 3.0
-        timeout_alcanzado = False
-        cancelado = False
-        
-        while not self._leer_sensor_centro():
-            if self._cancelar.is_set():
-                cancelado = True
-                break
-                
-            if (time.time() - inicio) > timeout_maximo:
-                self.get_logger().error("Falla mecanica o de sensor: Timeout de retorno excedido.")
-                timeout_alcanzado = True
-                break
-                
-            time.sleep(0.01)
-            
-        lgpio.gpio_write(self._h, self.IN1, 0)
-        lgpio.gpio_write(self._h, self.IN2, 0)
-        
-        if timeout_alcanzado:
-            self.posicion_actual = "ERROR"
-        elif not cancelado and self._leer_sensor_centro():
-            self.posicion_actual = "CENTRO"
-
-    def _activar_motor(self, in1_val: int, in2_val: int, duracion: float) -> None:
+    def _activar_motores(self, m1_in1: int, m1_in2: int, m2_in3: int, m2_in4: int, duracion: float) -> None:
         """
-        Activa los pines del motor, espera el tiempo indicado (con checks de cancelación)
-        y frena.
+        Activa los pines de ambos motores simultáneamente, espera la duración y frena ambos.
         """
-        lgpio.gpio_write(self._h, self.IN1, in1_val)
-        lgpio.gpio_write(self._h, self.IN2, in2_val)
+        # Encender Motor 1 y Motor 2
+        lgpio.gpio_write(self._h, self.IN1, m1_in1)
+        lgpio.gpio_write(self._h, self.IN2, m1_in2)
+        lgpio.gpio_write(self._h, self.IN3, m2_in3)
+        lgpio.gpio_write(self._h, self.IN4, m2_in4)
         
         # Espera activa para permitir cancelación
         inicio = time.time()
@@ -256,10 +202,12 @@ class NodoActuadores(Node):
                 break
             time.sleep(0.01)
             
-        # Frenar (ambos a 0)
+        # Frenar ambos motores (todos los pines a 0)
         lgpio.gpio_write(self._h, self.IN1, 0)
         lgpio.gpio_write(self._h, self.IN2, 0)
-        self.get_logger().info("Motor frenado.")
+        lgpio.gpio_write(self._h, self.IN3, 0)
+        lgpio.gpio_write(self._h, self.IN4, 0)
+        self.get_logger().info("Motores frenados.")
 
     def _cancelar_movimiento_actual(self) -> None:
         """
@@ -273,18 +221,21 @@ class NodoActuadores(Node):
             hilo.join(timeout=3.0)
 
     def destroy_node(self) -> None:
-        """Detiene el motor, libera recursos y cierra pines."""
+        """Detiene los motores, libera recursos y cierra pines."""
         self.get_logger().info("NodoActuadores: apagando — liberando recursos.")
         self._cancelar_movimiento_actual()
         try:
-            # Poner pines en 0
+            # Poner todos los pines a 0
             lgpio.gpio_write(self._h, self.IN1, 0)
             lgpio.gpio_write(self._h, self.IN2, 0)
+            lgpio.gpio_write(self._h, self.IN3, 0)
+            lgpio.gpio_write(self._h, self.IN4, 0)
             
             # Liberar gpios y cerrar chip
             lgpio.gpio_free(self._h, self.IN1)
             lgpio.gpio_free(self._h, self.IN2)
-            lgpio.gpio_free(self._h, self.pin_sensor_centro)
+            lgpio.gpio_free(self._h, self.IN3)
+            lgpio.gpio_free(self._h, self.IN4)
             lgpio.gpiochip_close(self._h)
             self.get_logger().info("GPIO liberado correctamente.")
         except Exception as exc:
@@ -297,7 +248,6 @@ def main(args=None) -> None:
     try:
         nodo = NodoActuadores()
     except RuntimeError:
-        # RuntimeError lanzado si lgpio no está disponible
         rclpy.shutdown()
         return
     except Exception as exc:
