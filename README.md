@@ -17,16 +17,19 @@ El paquete `stepper_control_pkg` implementa una arquitectura modular de responsa
 | Unidad de cómputo | Raspberry Pi 5 (8 GB) | — |
 | Cámara | Cámara UVC compatible (p. ej. 640×480 @ 30 FPS) | USB / V4L2 `/dev/video0` |
 | Sensor de masa | Celda de carga + convertidor HX711 (24-bit ADC) | GPIO bit-banging (gpiozero) |
-| Motor paso a paso | NEMA 17 + controlador pulso/dirección (p. ej. TB6600) | GPIO lgpio — PUL/DIR |
+| Motores DC | 2 Motores DC (IN1/IN2 y IN3/IN4) | GPIO lgpio — Control Puente H L298N |
 
 ### Pinout GPIO (BCM numbering — Raspberry Pi 5)
 
 | Señal | Pin BCM | Descripción |
 |---|---|---|
-| `PUL+` (Step) | GPIO 17 | Pulso de paso — motor paso a paso |
-| `DIR+` (Direction) | GPIO 27 | Dirección de giro (CW / CCW) |
+| `IN1` (Motor A) | GPIO 18 | Entrada 1 de control de puente H L298N |
+| `IN2` (Motor A) | GPIO 23 | Entrada 2 de control de puente H L298N |
+| `IN3` (Motor B) | GPIO 25 | Entrada 3 de control de puente H L298N |
+| `IN4` (Motor B) | GPIO 26 | Entrada 4 de control de puente H L298N |
 | `DT` (HX711 Data) | GPIO 5 | Línea de datos del ADC de 24 bits |
 | `SCK` (HX711 Clock) | GPIO 6 | Reloj de sincronización del ADC |
+
 
 ---
 
@@ -124,14 +127,11 @@ ros2 launch stepper_control_pkg main_launch.py
 ### Ajuste de Parámetros en Tiempo de Ejecución
 
 ```bash
-# Modificar velocidad del motor sin reiniciar el nodo
-ros2 param set /nodo_actuadores delay_pulso 0.001
+# Modificar el tiempo de giro de los motores sin reiniciar el nodo
+ros2 param set /nodo_actuadores tiempo_motor 4.5
 
-# Enviar comando de rotación manual (en grados)
+# Enviar comando de rotación manual (90.0 para dirección Botella, -90.0 para dirección Lata)
 ros2 topic pub --once /comando_grados std_msgs/Float32 "data: 90.0"
-
-# Enviar pasos directos al motor
-ros2 topic pub --once /comando_motor std_msgs/Int32 "data: 800"
 ```
 
 ### Monitoreo en Tiempo Real
