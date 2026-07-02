@@ -13,7 +13,7 @@ setup(
         ("share/ament_index/resource_index/packages", ["resource/" + PACKAGE_NAME]),
         # package.xml (obligatorio)
         ("share/" + PACKAGE_NAME, ["package.xml"]),
-        # Archivos launch — *.py captura kiosco_launch.py y cualquier futuro launch
+        # Archivos launch — *.py captura main_launch.py y cualquier futuro launch
         (os.path.join("share", PACKAGE_NAME, "launch"), glob("launch/*.py")),
         # Archivos de configuración YAML (si los hay)
         (os.path.join("share", PACKAGE_NAME, "config"), glob("config/*.yaml")),
@@ -32,6 +32,7 @@ setup(
             "nodo_actuadores = stepper_control_pkg.nodo_actuadores:main",
             "nodo_camara     = stepper_control_pkg.nodo_camara:main",
             "nodo_gui        = stepper_control_pkg.nodo_gui:main",
+            "nodo_balanza    = stepper_control_pkg.nodo_balanza:main",
         ],
     },
 )

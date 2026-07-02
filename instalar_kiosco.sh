@@ -58,7 +58,7 @@ cat > "${DESKTOP_FILE}" << EOF
 Type=Application
 Name=PanelKioscoROS2
 Comment=Panel de control NEMA 17 - arranca automáticamente con GNOME
-Exec=bash -c "sleep 5 && source /opt/ros/jazzy/setup.bash && source ${WS_DIR}/install/setup.bash && ros2 launch stepper_control_pkg kiosco_launch.py"
+Exec=bash -c "sleep 8 && export DISPLAY=:0 && source /opt/ros/jazzy/setup.bash && source ${WS_DIR}/install/setup.bash && ros2 launch stepper_control_pkg main_launch.py > ${HOME}/registro_kiosco.log 2>&1"
 X-GNOME-Autostart-enabled=true
 EOF
 

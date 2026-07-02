@@ -1,0 +1,11 @@
+nodo_balanza:
+  ros__parameters:
+    hx711_reference_unit: 2273.9
+
+nodo_camara:
+  ros__parameters:
+    distancia_camara_cm: 60.0
+
+nodo_actuadores:
+  ros__parameters:
+    tiempo_motor: 3.8

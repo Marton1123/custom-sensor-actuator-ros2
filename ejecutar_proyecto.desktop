@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Ejecutar Proyecto ROS2
+Comment=Inicia la interfaz visual del proyecto ROS2
+Exec=/home/lab-ros/ejecutar_proyecto.sh
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;
