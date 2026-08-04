@@ -2,14 +2,14 @@
 """
 nodo_actuadores.py
 ==================
-Nodo ROS 2 para control de actuadores, micro-centrado IR (Bang-Bang) y
+Nodo ROS 2 para control de actuadores, micro-centrado IR continuo (Homing) y
 validacion de peso mediante celda de carga (HX711) sobre Raspberry Pi 5 (lgpio).
 
 Arquitectura DevSecOps:
     - Controladores de hardware desacoplados con timeout estricto.
     - Ejecucion de la maquina de estados en worker thread para evitar bloqueo del executor ROS 2.
     - Sensor Fusion: Habilitacion de reciclaje condicionada a (Centrado IR == OK) AND (Peso <= Umbral).
-    - Centrado IR QTR-1A con Pull-Up interno, logica invertida y compensacion de inercia (backlash).
+    - Centrado continuo (Homing clasico) sin retardos de pulso, frenado instantaneo en 0-0 y compensacion de inercia.
 """
 
 import time
@@ -40,9 +40,8 @@ DEFAULT_UMBRAL_PESO_MAX: float = 40.0         # Gramos (envase limpio)
 
 # Parametros de tiempo y dinamica de actuadores
 DEFAULT_TIEMPO_MOTOR: float = 4.7
-DEFAULT_PULSO_MICROCENTRADO: float = 0.05      # Rafaga normal (50 ms)
 DEFAULT_PULSO_INERCIA: float = 0.005           # Pulso de gracia / inercia (5 ms)
-DEFAULT_TIMEOUT_MICROCENTRADO: float = 1.5
+DEFAULT_TIMEOUT_MICROCENTRADO: float = 5.0      # Timeout maximo de seguridad (5 s)
 
 
 class HX711DriverLGPIO:
@@ -159,7 +158,6 @@ class NodoActuadores(Node):
         self.declare_parameter("umbral_peso_max", DEFAULT_UMBRAL_PESO_MAX)
         self.declare_parameter("hx711_offset", DEFAULT_HX711_OFFSET)
         self.declare_parameter("hx711_reference_unit", DEFAULT_HX711_REFERENCE_UNIT)
-        self.declare_parameter("pulso_microcentrado", DEFAULT_PULSO_MICROCENTRADO)
         self.declare_parameter("pulso_inercia", DEFAULT_PULSO_INERCIA)
         self.declare_parameter("timeout_microcentrado", DEFAULT_TIMEOUT_MICROCENTRADO)
 
@@ -168,7 +166,6 @@ class NodoActuadores(Node):
         self._umbral_peso_max = float(self.get_parameter("umbral_peso_max").value)
         self._hx711_offset = float(self.get_parameter("hx711_offset").value)
         self._hx711_reference_unit = float(self.get_parameter("hx711_reference_unit").value)
-        self._pulso_microcentrado = float(self.get_parameter("pulso_microcentrado").value)
         self._pulso_inercia = float(self.get_parameter("pulso_inercia").value)
         self._timeout_microcentrado = float(self.get_parameter("timeout_microcentrado").value)
 
@@ -315,11 +312,11 @@ class NodoActuadores(Node):
             self.get_logger().warning("Ciclo cancelado durante centrado grueso.")
             return
 
-        # 2. Micro-centrado IR
-        self.get_logger().info("Paso 2: Ejecutando micro-centrado IR...")
+        # 2. Micro-centrado IR (Homing Continuo)
+        self.get_logger().info("Paso 2: Ejecutando centrado continuo IR...")
         centrado_ok = self._micro_centrar()
         if not centrado_ok:
-            self.get_logger().warning("Rechazado: Falla en micro-centrado IR. Abortando reciclaje.")
+            self.get_logger().warning("Rechazado: Falla en centrado continuo IR. Abortando reciclaje.")
             self._frenar_motores()
             return
 
@@ -362,16 +359,12 @@ class NodoActuadores(Node):
 
     def _micro_centrar(self) -> bool:
         """
-        Ejecuta control Bang-Bang con sensores IR (QTR-1A con Pull-Up) para centrado fino.
-        Tabla de verdad (Blanco=0, Negro=1):
-            0-0: Centro perfecto -> Aplica pulso de inercia y frena.
-            0-1: Desviado a la izquierda -> Corrige a la derecha.
-            1-0: Desviado a la derecha -> Corrige a la izquierda.
-            1-1: Brazo no detectado -> Busqueda a ciegas hacia la derecha.
+        Ejecuta control continuo (homing clasico) con sensores IR hasta detectar el centro exacto (0-0).
+        El motor se desplaza continuamente a maxima velocidad de ciclo sin pausas ni retardos intermedios.
+        Al detectar (0-0), se aplica un pulso de gracia (inercia) y se frena instantaneamente.
         """
         inicio = time.time()
         timeout = self._timeout_microcentrado
-        pulso_ms = self._pulso_microcentrado
         pulso_inercia = self._pulso_inercia
 
         dir_derecha = (1, 0, 1, 0)
@@ -386,32 +379,33 @@ class NodoActuadores(Node):
             izq = lgpio.gpio_read(self._h, self.SENSOR_IZQ)
             der = lgpio.gpio_read(self._h, self.SENSOR_DER)
 
-            # Estado 0-0: Centro perfecto
+            # Estado 0-0: Centro perfecto encontrado
             if izq == 0 and der == 0:
                 self.get_logger().info(
-                    "Micro-centrado exitoso (0-0): Aplicando compensacion de inercia."
+                    "Centro detectado (0-0): Aplicando compensacion de inercia y frenado instantaneo."
                 )
-                self._aplicar_pulso_motor(*ultima_direccion, pulso_inercia)
+                self._aplicar_estado_motores(*ultima_direccion)
+                time.sleep(pulso_inercia)
                 self._frenar_motores()
                 return True
 
             if izq == 0 and der == 1:
-                # Brazo desviado a la izquierda -> Corregir a la derecha
+                # Desviado a la izquierda -> Movimiento continuo a la derecha
                 ultima_direccion = dir_derecha
-                self._aplicar_pulso_motor(*dir_derecha, pulso_ms)
-                time.sleep(0.1)
+                self._aplicar_estado_motores(*dir_derecha)
             elif izq == 1 and der == 0:
-                # Brazo desviado a la derecha -> Corregir a la izquierda
+                # Desviado a la derecha -> Movimiento continuo a la izquierda
                 ultima_direccion = dir_izquierda
-                self._aplicar_pulso_motor(*dir_izquierda, pulso_ms)
-                time.sleep(0.1)
-            else:  # 1-1: Brazo perdido
-                # Busqueda a ciegas hacia la derecha
+                self._aplicar_estado_motores(*dir_izquierda)
+            else:
+                # 1-1: Brazo perdido -> Busqueda continua a la derecha
                 ultima_direccion = dir_derecha
-                self._aplicar_pulso_motor(*dir_derecha, pulso_ms)
-                time.sleep(0.1)
+                self._aplicar_estado_motores(*dir_derecha)
 
-        self.get_logger().warning("Micro-centrado fallido: Timeout superado.")
+            # Pausa minima cooperativa (1 ms) para no saturar el bus y permitir sondeo a alta frecuencia
+            time.sleep(0.001)
+
+        self.get_logger().warning("Micro-centrado fallido: Timeout superado (5s).")
         self._frenar_motores()
         return False
 
@@ -453,17 +447,19 @@ class NodoActuadores(Node):
 
         self._frenar_motores()
 
-    def _aplicar_pulso_motor(
-        self, m1_in1: int, m1_in2: int, m2_in3: int, m2_in4: int, duracion: float
-    ) -> None:
+    def _aplicar_estado_motores(self, m1_in1: int, m1_in2: int, m2_in3: int, m2_in4: int) -> None:
+        """
+        Aplica directamente los niveles logicos a los pines de los motores sin esperas.
+        """
         lgpio.gpio_write(self._h, self.IN1, m1_in1)
         lgpio.gpio_write(self._h, self.IN2, m1_in2)
         lgpio.gpio_write(self._h, self.IN3, m2_in3)
         lgpio.gpio_write(self._h, self.IN4, m2_in4)
-        time.sleep(duracion)
-        self._frenar_motores()
 
     def _frenar_motores(self) -> None:
+        """
+        Detiene instantaneamente ambos motores poniendo todos los pines en LOW.
+        """
         lgpio.gpio_write(self._h, self.IN1, 0)
         lgpio.gpio_write(self._h, self.IN2, 0)
         lgpio.gpio_write(self._h, self.IN3, 0)
