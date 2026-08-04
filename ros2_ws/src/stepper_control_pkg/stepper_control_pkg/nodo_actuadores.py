@@ -2,14 +2,14 @@
 """
 nodo_actuadores.py
 ==================
-Nodo ROS 2 para control de actuadores, micro-centrado IR continuo (Homing) y
+Nodo ROS 2 para control de actuadores, ciclo cerrado de reciclaje (Limpiaparabrisas) y
 validacion de peso mediante celda de carga (HX711) sobre Raspberry Pi 5 (lgpio).
 
 Arquitectura DevSecOps:
     - Controladores de hardware desacoplados con timeout estricto.
     - Ejecucion de la maquina de estados en worker thread para evitar bloqueo del executor ROS 2.
-    - Sensor Fusion: Habilitacion de reciclaje condicionada a (Centrado IR == OK) AND (Peso <= Umbral).
-    - Centrado continuo (Homing clasico) sin retardos de pulso, frenado instantaneo en 0-0 y compensacion de inercia.
+    - Sensor Fusion: Habilitacion de reciclaje condicionada a validacion de peso HX711 (Peso <= Umbral).
+    - Ciclo Cerrado de Reciclaje (Expulsion -> Retorno Logico -> Anclaje IR continuo) sin comandos intermedios.
 """
 
 import time
@@ -38,10 +38,15 @@ DEFAULT_HX711_OFFSET: float = 0.0
 DEFAULT_HX711_REFERENCE_UNIT: float = 2273.9  # Factor ADC -> gramos
 DEFAULT_UMBRAL_PESO_MAX: float = 40.0         # Gramos (envase limpio)
 
-# Parametros de tiempo y dinamica de actuadores
-DEFAULT_TIEMPO_MOTOR: float = 4.7
-DEFAULT_PULSO_INERCIA: float = 0.005           # Pulso de gracia / inercia (5 ms)
-DEFAULT_TIMEOUT_MICROCENTRADO: float = 5.0      # Timeout maximo de seguridad (5 s)
+# Parametros de dinamica de actuadores y ciclo de reciclaje
+DEFAULT_TIEMPO_EXTRA_EXPULSION: float = 0.8   # Segundos de giro tras detectar 1-1 en expulsion
+DEFAULT_PULSO_INERCIA: float = 0.005          # Pulso de gracia / inercia (5 ms)
+DEFAULT_TIMEOUT_CICLO: float = 7.0            # Timeout maximo de ciclo completo (7 s)
+
+# Definiciones de estados de sentido de giro
+DIR_DERECHA: Tuple[int, int, int, int] = (1, 0, 1, 0)
+DIR_IZQUIERDA: Tuple[int, int, int, int] = (0, 1, 0, 1)
+DIR_STOP: Tuple[int, int, int, int] = (0, 0, 0, 0)
 
 
 class HX711DriverLGPIO:
@@ -154,20 +159,20 @@ class NodoActuadores(Node):
 
         # ── Declaracion de Parametros ROS 2 ─────────────────────────────────
         self.declare_parameter("gpio_chip", 4)
-        self.declare_parameter("tiempo_motor", DEFAULT_TIEMPO_MOTOR)
+        self.declare_parameter("tiempo_extra_expulsion", DEFAULT_TIEMPO_EXTRA_EXPULSION)
         self.declare_parameter("umbral_peso_max", DEFAULT_UMBRAL_PESO_MAX)
         self.declare_parameter("hx711_offset", DEFAULT_HX711_OFFSET)
         self.declare_parameter("hx711_reference_unit", DEFAULT_HX711_REFERENCE_UNIT)
         self.declare_parameter("pulso_inercia", DEFAULT_PULSO_INERCIA)
-        self.declare_parameter("timeout_microcentrado", DEFAULT_TIMEOUT_MICROCENTRADO)
+        self.declare_parameter("timeout_ciclo", DEFAULT_TIMEOUT_CICLO)
 
         self._gpio_chip = self.get_parameter("gpio_chip").value
-        self._tiempo_motor = float(self.get_parameter("tiempo_motor").value)
+        self._tiempo_extra_expulsion = float(self.get_parameter("tiempo_extra_expulsion").value)
         self._umbral_peso_max = float(self.get_parameter("umbral_peso_max").value)
         self._hx711_offset = float(self.get_parameter("hx711_offset").value)
         self._hx711_reference_unit = float(self.get_parameter("hx711_reference_unit").value)
         self._pulso_inercia = float(self.get_parameter("pulso_inercia").value)
-        self._timeout_microcentrado = float(self.get_parameter("timeout_microcentrado").value)
+        self._timeout_ciclo = float(self.get_parameter("timeout_ciclo").value)
 
         # ── Asignacion de Pines GPIO (BCM) ──────────────────────────────────
         # Driver Motores L298N
@@ -217,11 +222,12 @@ class NodoActuadores(Node):
 
         self.get_logger().info(
             f"NodoActuadores inicializado correctamente\n"
-            f"  GPIO Chip    : gpiochip{self._gpio_chip}\n"
-            f"  Motores      : M1(IN1={self.IN1}, IN2={self.IN2}), M2(IN3={self.IN3}, IN4={self.IN4})\n"
-            f"  Sensores IR  : Izq=GPIO{self.SENSOR_IZQ}, Der=GPIO{self.SENSOR_DER} (PULL_UP)\n"
-            f"  HX711 Balanza: DT=GPIO{self.HX711_DT}, SCK=GPIO{self.HX711_SCK} (Umbral: {self._umbral_peso_max}g)\n"
-            f"  Suscripciones: '{self.TOPIC_COMANDO_GRADOS}', '{self.TOPIC_OBJETO_DETECTADO}'"
+            f"  GPIO Chip        : gpiochip{self._gpio_chip}\n"
+            f"  Motores          : M1(IN1={self.IN1}, IN2={self.IN2}), M2(IN3={self.IN3}, IN4={self.IN4})\n"
+            f"  Sensores IR      : Izq=GPIO{self.SENSOR_IZQ}, Der=GPIO{self.SENSOR_DER} (PULL_UP)\n"
+            f"  HX711 Balanza    : DT=GPIO{self.HX711_DT}, SCK=GPIO{self.HX711_SCK} (Umbral: {self._umbral_peso_max}g)\n"
+            f"  Timeout Ciclo    : {self._timeout_ciclo}s\n"
+            f"  Suscripciones    : '{self.TOPIC_COMANDO_GRADOS}', '{self.TOPIC_OBJETO_DETECTADO}'"
         )
 
     def _init_gpio(self) -> int:
@@ -250,6 +256,8 @@ class NodoActuadores(Node):
     def _cb_comando_grados(self, msg: Float32) -> None:
         """
         Procesa comandos por angulo.
+        El ciclo cerrado maneja el retorno a 0 de forma autonoma;
+        los comandos intermedios de 0.0 recibidos durante la ejecucion se ignoran.
         """
         comando = msg.data
         self.get_logger().info(f"Comando grados recibido: {comando}")
@@ -259,7 +267,14 @@ class NodoActuadores(Node):
         elif comando == -90.0:
             self._lanzar_ciclo_reciclaje("GIRAR_LATA")
         elif comando == 0.0:
-            self.get_logger().info("Comando Reset/Centro recibido.")
+            with self._lock:
+                en_ejecucion = self._hilo_ciclo is not None and self._hilo_ciclo.is_alive()
+            if en_ejecucion:
+                self.get_logger().info(
+                    "Comando 0.0 ignorado: el ciclo cerrado realiza el retorno y centrado automaticamente."
+                )
+            else:
+                self.get_logger().info("Comando 0.0 recibido en estado de reposo.")
         else:
             self.get_logger().warning(f"Comando angular desconocido: {comando}")
 
@@ -280,7 +295,7 @@ class NodoActuadores(Node):
 
     def _lanzar_ciclo_reciclaje(self, accion: str) -> None:
         """
-        Cancela cualquier movimiento previo y ejecuta la rutina completa en un worker thread.
+        Cancela cualquier movimiento previo y ejecuta el ciclo de lazo cerrado en un worker thread.
         """
         self._cancelar.set()
 
@@ -302,26 +317,12 @@ class NodoActuadores(Node):
 
     def _maquina_estados_reciclaje(self, accion: str) -> None:
         """
-        Maquina de estados para Sensor Fusion y ejecucion de reciclaje.
+        Maquina de estados para Sensor Fusion y ejecucion del ciclo cerrado de reciclaje.
         """
-        self.get_logger().info(f"Iniciando ciclo de reciclaje para {accion}")
+        self.get_logger().info(f"Iniciando ciclo cerrado de reciclaje para {accion}")
 
-        # 1. Movimiento de centrado grueso
-        self.get_logger().info("Paso 1: Ejecutando centrado grueso...")
-        if not self._ejecutar_centrado_grueso():
-            self.get_logger().warning("Ciclo cancelado durante centrado grueso.")
-            return
-
-        # 2. Micro-centrado IR (Homing Continuo)
-        self.get_logger().info("Paso 2: Ejecutando centrado continuo IR...")
-        centrado_ok = self._micro_centrar()
-        if not centrado_ok:
-            self.get_logger().warning("Rechazado: Falla en centrado continuo IR. Abortando reciclaje.")
-            self._frenar_motores()
-            return
-
-        # 3. Validacion de Limpieza con Balanza HX711
-        self.get_logger().info("Paso 3: Validando peso del envase con celda de carga...")
+        # 1. Validacion de Limpieza con Balanza HX711
+        self.get_logger().info("Validando peso del envase con celda de carga...")
         limpio_ok, peso_medido = self._validar_peso()
         if not limpio_ok:
             self.get_logger().warning(
@@ -330,48 +331,51 @@ class NodoActuadores(Node):
             self._frenar_motores()
             return
 
-        # 4. Accion de Reciclaje Habilitada
         self.get_logger().info(
-            f"Sensor Fusion OK (Centrado=OK, Peso={peso_medido:.2f}g). Habilitando reciclaje {accion}."
+            f"Sensor Fusion OK (Peso={peso_medido:.2f}g <= {self._umbral_peso_max}g). Habilitando ciclo de expulsion."
         )
-        self._ejecutar_giro_reciclaje(accion)
-        self.get_logger().info("Ciclo de reciclaje finalizado exitosamente.")
 
-    def _ejecutar_centrado_grueso(self) -> bool:
-        """
-        Mueve los motores durante el tiempo configurado para la etapa gruesa.
-        """
-        tiempo = self._tiempo_motor
-        lgpio.gpio_write(self._h, self.IN1, 1)
-        lgpio.gpio_write(self._h, self.IN2, 0)
-        lgpio.gpio_write(self._h, self.IN3, 1)
-        lgpio.gpio_write(self._h, self.IN4, 0)
+        # 2. Mapeo de direccion de expulsion inicial
+        if accion == "GIRAR_LATA":
+            direccion_ida = DIR_IZQUIERDA
+        elif accion == "GIRAR_BOTELLA":
+            direccion_ida = DIR_DERECHA
+        else:
+            self.get_logger().error(f"Accion desconocida: {accion}")
+            return
 
-        t0 = time.time()
-        while (time.time() - t0) < tiempo:
-            if self._cancelar.is_set():
-                self._frenar_motores()
-                return False
-            time.sleep(0.01)
+        # 3. Ejecucion del ciclo ininterrumpido de Ida y Vuelta
+        exito = self._ejecutar_ciclo_expulsion(direccion_ida)
+        if exito:
+            self.get_logger().info(f"Ciclo cerrado de reciclaje ({accion}) completado exitosamente.")
+        else:
+            self.get_logger().warning(f"Ciclo cerrado de reciclaje ({accion}) finalizo con errores o timeout.")
 
-        self._frenar_motores()
-        return True
-
-    def _micro_centrar(self) -> bool:
+    def _ejecutar_ciclo_expulsion(
+        self, direccion_ida: Tuple[int, int, int, int]
+    ) -> bool:
         """
-        Ejecuta control continuo (homing clasico) con sensores IR hasta detectar el centro exacto (0-0).
-        El motor se desplaza continuamente a maxima velocidad de ciclo sin pausas ni retardos intermedios.
-        Al detectar (0-0), se aplica un pulso de gracia (inercia) y se frena instantaneamente.
+        Ejecuta el ciclo cerrado de reciclaje ininterrumpido (Limpiaparabrisas):
+            1. Fase de Expulsion: Giro continuo en direccion_ida hasta detectar 1-1 + delay de 0.8s.
+            2. Fase de Retorno Logico: Inversion de giro continua hacia el centro hasta detectar borde blanco.
+            3. Fase de Anclaje: Micro-centrado continuo hasta 0-0 con pulso de inercia y frenado.
         """
-        inicio = time.time()
-        timeout = self._timeout_microcentrado
+        t_inicio = time.time()
+        timeout = self._timeout_ciclo
         pulso_inercia = self._pulso_inercia
+        tiempo_extra = self._tiempo_extra_expulsion
 
-        dir_derecha = (1, 0, 1, 0)
-        dir_izquierda = (0, 1, 0, 1)
-        ultima_direccion = dir_derecha
+        # Definicion de direccion inversa para el retorno
+        dir_retorno = DIR_IZQUIERDA if direccion_ida == DIR_DERECHA else DIR_DERECHA
 
-        while (time.time() - inicio) < timeout:
+        # ────────────────────────────────────────────────────────────────────
+        # FASE 1: EXPULSION (Escape del blanco hacia el contenedor)
+        # ────────────────────────────────────────────────────────────────────
+        self.get_logger().info("Fase 1: Expulsion activa hacia contenedor...")
+        self._aplicar_estado_motores(*direccion_ida)
+
+        # Esperar a que el brazo salga de la cinta blanca (ambos sensores en 1)
+        while (time.time() - t_inicio) < timeout:
             if self._cancelar.is_set():
                 self._frenar_motores()
                 return False
@@ -379,10 +383,66 @@ class NodoActuadores(Node):
             izq = lgpio.gpio_read(self._h, self.SENSOR_IZQ)
             der = lgpio.gpio_read(self._h, self.SENSOR_DER)
 
-            # Estado 0-0: Centro perfecto encontrado
+            if izq == 1 and der == 1:
+                # El brazo ha salido del centro; mantener giro el tiempo extra de seguridad
+                self.get_logger().info("Brazo fuera de rango central (1-1). Aplicando delay de caida...")
+                t_delay = time.time()
+                while (time.time() - t_delay) < tiempo_extra:
+                    if self._cancelar.is_set():
+                        self._frenar_motores()
+                        return False
+                    time.sleep(0.01)
+                break
+
+            time.sleep(0.001)
+        else:
+            self.get_logger().warning("Timeout en Fase 1 (Expulsion). Abortando ciclo.")
+            self._frenar_motores()
+            return False
+
+        # ────────────────────────────────────────────────────────────────────
+        # FASE 2: RETORNO LOGICO (Busqueda del cero con orientacion conocida)
+        # ────────────────────────────────────────────────────────────────────
+        self.get_logger().info("Fase 2: Retorno continuo buscando borde central...")
+        self._aplicar_estado_motores(*dir_retorno)
+
+        # Retornar continuamente hasta que cualquier sensor toque la cinta blanca (deje de ser 1-1)
+        while (time.time() - t_inicio) < timeout:
+            if self._cancelar.is_set():
+                self._frenar_motores()
+                return False
+
+            izq = lgpio.gpio_read(self._h, self.SENSOR_IZQ)
+            der = lgpio.gpio_read(self._h, self.SENSOR_DER)
+
+            if izq == 0 or der == 0:
+                self.get_logger().info(f"Borde central detectado (Izq={izq}, Der={der}). Pasando a Fase 3.")
+                break
+
+            time.sleep(0.001)
+        else:
+            self.get_logger().warning("Timeout en Fase 2 (Retorno). Abortando ciclo.")
+            self._frenar_motores()
+            return False
+
+        # ────────────────────────────────────────────────────────────────────
+        # FASE 3: ANCLAJE (Micro-centrado continuo de precision)
+        # ────────────────────────────────────────────────────────────────────
+        self.get_logger().info("Fase 3: Micro-centrado y anclaje continuo...")
+        ultima_direccion = dir_retorno
+
+        while (time.time() - t_inicio) < timeout:
+            if self._cancelar.is_set():
+                self._frenar_motores()
+                return False
+
+            izq = lgpio.gpio_read(self._h, self.SENSOR_IZQ)
+            der = lgpio.gpio_read(self._h, self.SENSOR_DER)
+
+            # Estado 0-0: Centro perfecto alcanzado
             if izq == 0 and der == 0:
                 self.get_logger().info(
-                    "Centro detectado (0-0): Aplicando compensacion de inercia y frenado instantaneo."
+                    "Centro perfecto alcanzado (0-0). Aplicando compensacion de inercia y frenado."
                 )
                 self._aplicar_estado_motores(*ultima_direccion)
                 time.sleep(pulso_inercia)
@@ -390,22 +450,20 @@ class NodoActuadores(Node):
                 return True
 
             if izq == 0 and der == 1:
-                # Desviado a la izquierda -> Movimiento continuo a la derecha
-                ultima_direccion = dir_derecha
-                self._aplicar_estado_motores(*dir_derecha)
+                # Desviado a la izquierda -> Corregir a la derecha
+                ultima_direccion = DIR_DERECHA
+                self._aplicar_estado_motores(*DIR_DERECHA)
             elif izq == 1 and der == 0:
-                # Desviado a la derecha -> Movimiento continuo a la izquierda
-                ultima_direccion = dir_izquierda
-                self._aplicar_estado_motores(*dir_izquierda)
+                # Desviado a la derecha -> Corregir a la izquierda
+                ultima_direccion = DIR_IZQUIERDA
+                self._aplicar_estado_motores(*DIR_IZQUIERDA)
             else:
-                # 1-1: Brazo perdido -> Busqueda continua a la derecha
-                ultima_direccion = dir_derecha
-                self._aplicar_estado_motores(*dir_derecha)
+                # 1-1 durante correccion -> Mantener ultima direccion conocida
+                self._aplicar_estado_motores(*ultima_direccion)
 
-            # Pausa minima cooperativa (1 ms) para no saturar el bus y permitir sondeo a alta frecuencia
             time.sleep(0.001)
 
-        self.get_logger().warning("Micro-centrado fallido: Timeout superado (5s).")
+        self.get_logger().warning("Timeout en Fase 3 (Anclaje). Abortando ciclo.")
         self._frenar_motores()
         return False
 
@@ -422,30 +480,6 @@ class NodoActuadores(Node):
         except Exception as exc:
             self.get_logger().error(f"Error leyendo sensor HX711: {exc}")
             return False, 999.0
-
-    def _ejecutar_giro_reciclaje(self, accion: str) -> None:
-        """
-        Ejecuta la apertura/giro clasificador definitivo.
-        """
-        tiempo = self._tiempo_motor
-        if accion == "GIRAR_BOTELLA":
-            lgpio.gpio_write(self._h, self.IN1, 1)
-            lgpio.gpio_write(self._h, self.IN2, 0)
-            lgpio.gpio_write(self._h, self.IN3, 1)
-            lgpio.gpio_write(self._h, self.IN4, 0)
-        elif accion == "GIRAR_LATA":
-            lgpio.gpio_write(self._h, self.IN1, 0)
-            lgpio.gpio_write(self._h, self.IN2, 1)
-            lgpio.gpio_write(self._h, self.IN3, 0)
-            lgpio.gpio_write(self._h, self.IN4, 1)
-
-        t0 = time.time()
-        while (time.time() - t0) < tiempo:
-            if self._cancelar.is_set():
-                break
-            time.sleep(0.01)
-
-        self._frenar_motores()
 
     def _aplicar_estado_motores(self, m1_in1: int, m1_in2: int, m2_in3: int, m2_in4: int) -> None:
         """
