@@ -9,6 +9,7 @@ Arquitectura DevSecOps:
     - Controladores de hardware desacoplados con timeout estricto.
     - Ejecucion de la maquina de estados en worker thread para evitar bloqueo del executor ROS 2.
     - Sensor Fusion: Habilitacion de reciclaje condicionada a (Centrado IR == OK) AND (Peso <= Umbral).
+    - Centrado IR QTR-1A con Pull-Up interno, logica invertida y compensacion de inercia (backlash).
 """
 
 import time
@@ -37,9 +38,10 @@ DEFAULT_HX711_OFFSET: float = 0.0
 DEFAULT_HX711_REFERENCE_UNIT: float = 2273.9  # Factor ADC -> gramos
 DEFAULT_UMBRAL_PESO_MAX: float = 40.0         # Gramos (envase limpio)
 
-# Parametros de tiempo de actuadores
+# Parametros de tiempo y dinamica de actuadores
 DEFAULT_TIEMPO_MOTOR: float = 4.7
-DEFAULT_PULSO_MICROCENTRADO: float = 0.05
+DEFAULT_PULSO_MICROCENTRADO: float = 0.05      # Rafaga normal (50 ms)
+DEFAULT_PULSO_INERCIA: float = 0.005           # Pulso de gracia / inercia (5 ms)
 DEFAULT_TIMEOUT_MICROCENTRADO: float = 1.5
 
 
@@ -158,6 +160,7 @@ class NodoActuadores(Node):
         self.declare_parameter("hx711_offset", DEFAULT_HX711_OFFSET)
         self.declare_parameter("hx711_reference_unit", DEFAULT_HX711_REFERENCE_UNIT)
         self.declare_parameter("pulso_microcentrado", DEFAULT_PULSO_MICROCENTRADO)
+        self.declare_parameter("pulso_inercia", DEFAULT_PULSO_INERCIA)
         self.declare_parameter("timeout_microcentrado", DEFAULT_TIMEOUT_MICROCENTRADO)
 
         self._gpio_chip = self.get_parameter("gpio_chip").value
@@ -166,6 +169,7 @@ class NodoActuadores(Node):
         self._hx711_offset = float(self.get_parameter("hx711_offset").value)
         self._hx711_reference_unit = float(self.get_parameter("hx711_reference_unit").value)
         self._pulso_microcentrado = float(self.get_parameter("pulso_microcentrado").value)
+        self._pulso_inercia = float(self.get_parameter("pulso_inercia").value)
         self._timeout_microcentrado = float(self.get_parameter("timeout_microcentrado").value)
 
         # ── Asignacion de Pines GPIO (BCM) ──────────────────────────────────
@@ -175,7 +179,7 @@ class NodoActuadores(Node):
         self.IN3 = 25
         self.IN4 = 26
 
-        # Sensores Infrarrojos (Micro-Centrado)
+        # Sensores Infrarrojos QTR-1A (Micro-Centrado)
         self.SENSOR_IZQ = 17
         self.SENSOR_DER = 27
 
@@ -218,7 +222,7 @@ class NodoActuadores(Node):
             f"NodoActuadores inicializado correctamente\n"
             f"  GPIO Chip    : gpiochip{self._gpio_chip}\n"
             f"  Motores      : M1(IN1={self.IN1}, IN2={self.IN2}), M2(IN3={self.IN3}, IN4={self.IN4})\n"
-            f"  Sensores IR  : Izq=GPIO{self.SENSOR_IZQ}, Der=GPIO{self.SENSOR_DER}\n"
+            f"  Sensores IR  : Izq=GPIO{self.SENSOR_IZQ}, Der=GPIO{self.SENSOR_DER} (PULL_UP)\n"
             f"  HX711 Balanza: DT=GPIO{self.HX711_DT}, SCK=GPIO{self.HX711_SCK} (Umbral: {self._umbral_peso_max}g)\n"
             f"  Suscripciones: '{self.TOPIC_COMANDO_GRADOS}', '{self.TOPIC_OBJETO_DETECTADO}'"
         )
@@ -226,6 +230,7 @@ class NodoActuadores(Node):
     def _init_gpio(self) -> int:
         """
         Reclama y configura todos los pines GPIO de forma segura.
+        Los sensores IR se configuran obligatoriamente con resistencia interna PULL_UP.
         """
         handle = lgpio.gpiochip_open(self._gpio_chip)
 
@@ -235,9 +240,9 @@ class NodoActuadores(Node):
         lgpio.gpio_claim_output(handle, self.IN3, 0)
         lgpio.gpio_claim_output(handle, self.IN4, 0)
 
-        # Entradas digitales de sensores IR
-        lgpio.gpio_claim_input(handle, self.SENSOR_IZQ)
-        lgpio.gpio_claim_input(handle, self.SENSOR_DER)
+        # Entradas digitales de sensores IR con PULL_UP
+        lgpio.gpio_claim_input(handle, self.SENSOR_IZQ, lgpio.SET_PULL_UP)
+        lgpio.gpio_claim_input(handle, self.SENSOR_DER, lgpio.SET_PULL_UP)
 
         # Pines de comunicacion HX711
         lgpio.gpio_claim_input(handle, self.HX711_DT)
@@ -357,16 +362,21 @@ class NodoActuadores(Node):
 
     def _micro_centrar(self) -> bool:
         """
-        Ejecuta control Bang-Bang con sensores IR hasta que ambos lean 1 (centrado).
-        Retorna True si el centrado es exitoso dentro del timeout de 1.5s.
+        Ejecuta control Bang-Bang con sensores IR (QTR-1A con Pull-Up) para centrado fino.
+        Tabla de verdad (Blanco=0, Negro=1):
+            0-0: Centro perfecto -> Aplica pulso de inercia y frena.
+            0-1: Desviado a la izquierda -> Corrige a la derecha.
+            1-0: Desviado a la derecha -> Corrige a la izquierda.
+            1-1: Brazo no detectado -> Busqueda a ciegas hacia la derecha.
         """
         inicio = time.time()
         timeout = self._timeout_microcentrado
-        pulso = self._pulso_microcentrado
+        pulso_ms = self._pulso_microcentrado
+        pulso_inercia = self._pulso_inercia
 
-        # Mapeo de polaridad para micropulsos
-        dir_correccion_derecha = (1, 0, 1, 0)
-        dir_correccion_izquierda = (0, 1, 0, 1)
+        dir_derecha = (1, 0, 1, 0)
+        dir_izquierda = (0, 1, 0, 1)
+        ultima_direccion = dir_derecha
 
         while (time.time() - inicio) < timeout:
             if self._cancelar.is_set():
@@ -376,21 +386,30 @@ class NodoActuadores(Node):
             izq = lgpio.gpio_read(self._h, self.SENSOR_IZQ)
             der = lgpio.gpio_read(self._h, self.SENSOR_DER)
 
-            # Estado Ideal: Ambos sensores detectan el brazo (1, 1)
-            if izq == 1 and der == 1:
-                self.get_logger().info("Micro-centrado exitoso: Ambos sensores en HIGH.")
+            # Estado 0-0: Centro perfecto
+            if izq == 0 and der == 0:
+                self.get_logger().info(
+                    "Micro-centrado exitoso (0-0): Aplicando compensacion de inercia."
+                )
+                self._aplicar_pulso_motor(*ultima_direccion, pulso_inercia)
                 self._frenar_motores()
                 return True
 
-            if izq == 1 and der == 0:
+            if izq == 0 and der == 1:
                 # Brazo desviado a la izquierda -> Corregir a la derecha
-                self._aplicar_pulso_motor(*dir_correccion_derecha, pulso)
-            elif izq == 0 and der == 1:
+                ultima_direccion = dir_derecha
+                self._aplicar_pulso_motor(*dir_derecha, pulso_ms)
+                time.sleep(0.1)
+            elif izq == 1 and der == 0:
                 # Brazo desviado a la derecha -> Corregir a la izquierda
-                self._aplicar_pulso_motor(*dir_correccion_izquierda, pulso)
-            else:
-                # Ambos en 0: Fuera de alineacion -> Breve espera
-                time.sleep(0.01)
+                ultima_direccion = dir_izquierda
+                self._aplicar_pulso_motor(*dir_izquierda, pulso_ms)
+                time.sleep(0.1)
+            else:  # 1-1: Brazo perdido
+                # Busqueda a ciegas hacia la derecha
+                ultima_direccion = dir_derecha
+                self._aplicar_pulso_motor(*dir_derecha, pulso_ms)
+                time.sleep(0.1)
 
         self.get_logger().warning("Micro-centrado fallido: Timeout superado.")
         self._frenar_motores()
