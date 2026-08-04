@@ -40,7 +40,7 @@ DEFAULT_UMBRAL_PESO_MAX: float = 40.0         # Gramos (envase limpio)
 
 # Parametros de dinamica de actuadores y ciclo de reciclaje
 DEFAULT_PULSO_INERCIA: float = 0.005          # Pulso de gracia / inercia (5 ms)
-DEFAULT_TIMEOUT_CICLO: float = 7.0            # Timeout maximo de ciclo completo (7 s)
+DEFAULT_TIMEOUT_CICLO: float = 20.0           # Timeout maximo de ciclo completo (20 s)
 
 # Definiciones de estados de sentido de giro
 DIR_DERECHA: Tuple[int, int, int, int] = (1, 0, 1, 0)
@@ -415,10 +415,10 @@ class NodoActuadores(Node):
             return False
 
         # ────────────────────────────────────────────────────────────────────
-        # FASE 3: ANCLAJE (Micro-centrado continuo de precision)
+        # FASE 3: ANCLAJE (Bucle de auto-ajuste y centrado continuo)
         # ────────────────────────────────────────────────────────────────────
-        self.get_logger().info("Fase 3: Micro-centrado y anclaje continuo...")
-        ultima_direccion = direccion_ida
+        self.get_logger().info("Fase 3: Borde detectado. Iniciando auto-ajuste de anclaje continuo...")
+        ultima_direccion_movimiento = direccion_ida
 
         while (time.time() - t_inicio) < timeout:
             if self._cancelar.is_set():
@@ -433,23 +433,28 @@ class NodoActuadores(Node):
                 self.get_logger().info(
                     "Centro perfecto alcanzado (0-0). Aplicando compensacion de inercia y frenado."
                 )
-                self._aplicar_estado_motores(*ultima_direccion)
+                self._aplicar_estado_motores(*ultima_direccion_movimiento)
                 time.sleep(pulso_inercia)
                 self._frenar_motores()
                 return True
 
-            if izq == 0 and der == 1:
-                # Desviado a la izquierda -> Corregir a la derecha
-                ultima_direccion = DIR_DERECHA
+            elif izq == 0 and der == 1:
+                # Tapo el izquierdo, falta el derecho -> Mover a la derecha
+                ultima_direccion_movimiento = DIR_DERECHA
                 self._aplicar_estado_motores(*DIR_DERECHA)
-            elif izq == 1 and der == 0:
-                # Desviado a la derecha -> Corregir a la izquierda
-                ultima_direccion = DIR_IZQUIERDA
-                self._aplicar_estado_motores(*DIR_IZQUIERDA)
-            else:
-                # 1-1 durante correccion -> Mantener ultima direccion conocida
-                self._aplicar_estado_motores(*ultima_direccion)
 
+            elif izq == 1 and der == 0:
+                # Tapo el derecho, falta el izquierdo -> Mover a la izquierda
+                ultima_direccion_movimiento = DIR_IZQUIERDA
+                self._aplicar_estado_motores(*DIR_IZQUIERDA)
+
+            else:
+                # 1-1: Por inercia se paso de largo y salio de la cinta
+                # Seguir buscando en la direccion original del giro 360
+                ultima_direccion_movimiento = direccion_ida
+                self._aplicar_estado_motores(*direccion_ida)
+
+            # Polling cooperativo de alta velocidad
             time.sleep(0.001)
 
         self.get_logger().warning("Timeout en Fase 3 (Anclaje). Abortando ciclo.")
