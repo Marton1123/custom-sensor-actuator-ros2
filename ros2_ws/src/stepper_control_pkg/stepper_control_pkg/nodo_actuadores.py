@@ -2,14 +2,14 @@
 """
 nodo_actuadores.py
 ==================
-Nodo ROS 2 para control de actuadores, ciclo cerrado de reciclaje (Limpiaparabrisas) y
+Nodo ROS 2 para control de actuadores, ciclo continuo unidireccional de 360 grados y
 validacion de peso mediante celda de carga (HX711) sobre Raspberry Pi 5 (lgpio).
 
 Arquitectura DevSecOps:
     - Controladores de hardware desacoplados con timeout estricto.
     - Ejecucion de la maquina de estados en worker thread para evitar bloqueo del executor ROS 2.
     - Sensor Fusion: Habilitacion de reciclaje condicionada a validacion de peso HX711 (Peso <= Umbral).
-    - Ciclo Cerrado de Reciclaje (Expulsion -> Retorno Logico -> Anclaje IR continuo) sin comandos intermedios.
+    - Ciclo Cerrado Unidireccional 360° (Escape -> Trayecto continuo -> Anclaje IR) sin inversiones de marcha.
 """
 
 import time
@@ -39,7 +39,6 @@ DEFAULT_HX711_REFERENCE_UNIT: float = 2273.9  # Factor ADC -> gramos
 DEFAULT_UMBRAL_PESO_MAX: float = 40.0         # Gramos (envase limpio)
 
 # Parametros de dinamica de actuadores y ciclo de reciclaje
-DEFAULT_TIEMPO_EXTRA_EXPULSION: float = 0.8   # Segundos de giro tras detectar 1-1 en expulsion
 DEFAULT_PULSO_INERCIA: float = 0.005          # Pulso de gracia / inercia (5 ms)
 DEFAULT_TIMEOUT_CICLO: float = 7.0            # Timeout maximo de ciclo completo (7 s)
 
@@ -159,7 +158,6 @@ class NodoActuadores(Node):
 
         # ── Declaracion de Parametros ROS 2 ─────────────────────────────────
         self.declare_parameter("gpio_chip", 4)
-        self.declare_parameter("tiempo_extra_expulsion", DEFAULT_TIEMPO_EXTRA_EXPULSION)
         self.declare_parameter("umbral_peso_max", DEFAULT_UMBRAL_PESO_MAX)
         self.declare_parameter("hx711_offset", DEFAULT_HX711_OFFSET)
         self.declare_parameter("hx711_reference_unit", DEFAULT_HX711_REFERENCE_UNIT)
@@ -167,7 +165,6 @@ class NodoActuadores(Node):
         self.declare_parameter("timeout_ciclo", DEFAULT_TIMEOUT_CICLO)
 
         self._gpio_chip = self.get_parameter("gpio_chip").value
-        self._tiempo_extra_expulsion = float(self.get_parameter("tiempo_extra_expulsion").value)
         self._umbral_peso_max = float(self.get_parameter("umbral_peso_max").value)
         self._hx711_offset = float(self.get_parameter("hx711_offset").value)
         self._hx711_reference_unit = float(self.get_parameter("hx711_reference_unit").value)
@@ -271,7 +268,7 @@ class NodoActuadores(Node):
                 en_ejecucion = self._hilo_ciclo is not None and self._hilo_ciclo.is_alive()
             if en_ejecucion:
                 self.get_logger().info(
-                    "Comando 0.0 ignorado: el ciclo cerrado realiza el retorno y centrado automaticamente."
+                    "Comando 0.0 ignorado: el ciclo realiza el recorrido completo 360 y centrado automaticamente."
                 )
             else:
                 self.get_logger().info("Comando 0.0 recibido en estado de reposo.")
@@ -295,7 +292,7 @@ class NodoActuadores(Node):
 
     def _lanzar_ciclo_reciclaje(self, accion: str) -> None:
         """
-        Cancela cualquier movimiento previo y ejecuta el ciclo de lazo cerrado en un worker thread.
+        Cancela cualquier movimiento previo y ejecuta el ciclo 360 en un worker thread.
         """
         self._cancelar.set()
 
@@ -317,9 +314,9 @@ class NodoActuadores(Node):
 
     def _maquina_estados_reciclaje(self, accion: str) -> None:
         """
-        Maquina de estados para Sensor Fusion y ejecucion del ciclo cerrado de reciclaje.
+        Maquina de estados para Sensor Fusion y ejecucion del ciclo de reciclaje continuo de 360 grados.
         """
-        self.get_logger().info(f"Iniciando ciclo cerrado de reciclaje para {accion}")
+        self.get_logger().info(f"Iniciando ciclo unidireccional 360 de reciclaje para {accion}")
 
         # 1. Validacion de Limpieza con Balanza HX711
         self.get_logger().info("Validando peso del envase con celda de carga...")
@@ -332,10 +329,10 @@ class NodoActuadores(Node):
             return
 
         self.get_logger().info(
-            f"Sensor Fusion OK (Peso={peso_medido:.2f}g <= {self._umbral_peso_max}g). Habilitando ciclo de expulsion."
+            f"Sensor Fusion OK (Peso={peso_medido:.2f}g <= {self._umbral_peso_max}g). Habilitando giro 360."
         )
 
-        # 2. Mapeo de direccion de expulsion inicial
+        # 2. Mapeo de direccion de giro continuo unidireccional
         if accion == "GIRAR_LATA":
             direccion_ida = DIR_IZQUIERDA
         elif accion == "GIRAR_BOTELLA":
@@ -344,34 +341,30 @@ class NodoActuadores(Node):
             self.get_logger().error(f"Accion desconocida: {accion}")
             return
 
-        # 3. Ejecucion del ciclo ininterrumpido de Ida y Vuelta
+        # 3. Ejecucion del ciclo 360 continuo ininterrumpido
         exito = self._ejecutar_ciclo_expulsion(direccion_ida)
         if exito:
-            self.get_logger().info(f"Ciclo cerrado de reciclaje ({accion}) completado exitosamente.")
+            self.get_logger().info(f"Ciclo 360 de reciclaje ({accion}) completado exitosamente.")
         else:
-            self.get_logger().warning(f"Ciclo cerrado de reciclaje ({accion}) finalizo con errores o timeout.")
+            self.get_logger().warning(f"Ciclo 360 de reciclaje ({accion}) finalizo con errores o timeout.")
 
     def _ejecutar_ciclo_expulsion(
         self, direccion_ida: Tuple[int, int, int, int]
     ) -> bool:
         """
-        Ejecuta el ciclo cerrado de reciclaje ininterrumpido (Limpiaparabrisas):
-            1. Fase de Expulsion: Giro continuo en direccion_ida hasta detectar 1-1 + delay de 0.8s.
-            2. Fase de Retorno Logico: Inversion de giro continua hacia el centro hasta detectar borde blanco.
+        Ejecuta el ciclo continuo unidireccional de 360 grados:
+            1. Fase de Escape: Giro continuo en direccion_ida hasta detectar 1-1 (salida del nido central).
+            2. Fase de Trayecto: Giro continuo en la MISMA direccion (caida libre del envase) hasta detectar blanco.
             3. Fase de Anclaje: Micro-centrado continuo hasta 0-0 con pulso de inercia y frenado.
         """
         t_inicio = time.time()
         timeout = self._timeout_ciclo
         pulso_inercia = self._pulso_inercia
-        tiempo_extra = self._tiempo_extra_expulsion
-
-        # Definicion de direccion inversa para el retorno
-        dir_retorno = DIR_IZQUIERDA if direccion_ida == DIR_DERECHA else DIR_DERECHA
 
         # ────────────────────────────────────────────────────────────────────
-        # FASE 1: EXPULSION (Escape del blanco hacia el contenedor)
+        # FASE 1: ESCAPE (Salir del nido central)
         # ────────────────────────────────────────────────────────────────────
-        self.get_logger().info("Fase 1: Expulsion activa hacia contenedor...")
+        self.get_logger().info("Fase 1: Escape inicial del punto cero...")
         self._aplicar_estado_motores(*direccion_ida)
 
         # Esperar a que el brazo salga de la cinta blanca (ambos sensores en 1)
@@ -384,29 +377,23 @@ class NodoActuadores(Node):
             der = lgpio.gpio_read(self._h, self.SENSOR_DER)
 
             if izq == 1 and der == 1:
-                # El brazo ha salido del centro; mantener giro el tiempo extra de seguridad
-                self.get_logger().info("Brazo fuera de rango central (1-1). Aplicando delay de caida...")
-                t_delay = time.time()
-                while (time.time() - t_delay) < tiempo_extra:
-                    if self._cancelar.is_set():
-                        self._frenar_motores()
-                        return False
-                    time.sleep(0.01)
+                self.get_logger().info("Brazo fuera de rango central (1-1). Pasando a Fase 2 (Trayecto 360).")
                 break
 
             time.sleep(0.001)
         else:
-            self.get_logger().warning("Timeout en Fase 1 (Expulsion). Abortando ciclo.")
+            self.get_logger().warning("Timeout en Fase 1 (Escape). Abortando ciclo.")
             self._frenar_motores()
             return False
 
         # ────────────────────────────────────────────────────────────────────
-        # FASE 2: RETORNO LOGICO (Busqueda del cero con orientacion conocida)
+        # FASE 2: TRAYECTO (Giro continuo 360 y caida por gravedad)
         # ────────────────────────────────────────────────────────────────────
-        self.get_logger().info("Fase 2: Retorno continuo buscando borde central...")
-        self._aplicar_estado_motores(*dir_retorno)
+        self.get_logger().info("Fase 2: Trayecto continuo 360 en misma direccion...")
+        # Mantener motores en direccion_ida sin invertir marcha
+        self._aplicar_estado_motores(*direccion_ida)
 
-        # Retornar continuamente hasta que cualquier sensor toque la cinta blanca (deje de ser 1-1)
+        # Seguir girando continuamente hasta que cualquier sensor vuelva a detectar la cinta blanca (deje de ser 1-1)
         while (time.time() - t_inicio) < timeout:
             if self._cancelar.is_set():
                 self._frenar_motores()
@@ -416,12 +403,14 @@ class NodoActuadores(Node):
             der = lgpio.gpio_read(self._h, self.SENSOR_DER)
 
             if izq == 0 or der == 0:
-                self.get_logger().info(f"Borde central detectado (Izq={izq}, Der={der}). Pasando a Fase 3.")
+                self.get_logger().info(
+                    f"Borde central detectado tras trayecto (Izq={izq}, Der={der}). Pasando a Fase 3."
+                )
                 break
 
             time.sleep(0.001)
         else:
-            self.get_logger().warning("Timeout en Fase 2 (Retorno). Abortando ciclo.")
+            self.get_logger().warning("Timeout en Fase 2 (Trayecto). Abortando ciclo.")
             self._frenar_motores()
             return False
 
@@ -429,7 +418,7 @@ class NodoActuadores(Node):
         # FASE 3: ANCLAJE (Micro-centrado continuo de precision)
         # ────────────────────────────────────────────────────────────────────
         self.get_logger().info("Fase 3: Micro-centrado y anclaje continuo...")
-        ultima_direccion = dir_retorno
+        ultima_direccion = direccion_ida
 
         while (time.time() - t_inicio) < timeout:
             if self._cancelar.is_set():
