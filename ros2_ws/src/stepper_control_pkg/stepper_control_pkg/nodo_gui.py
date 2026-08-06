@@ -271,7 +271,29 @@ class VentanaPrincipal(QMainWindow):
         self.btn_confirmar.setStyleSheet(self._estilo_btn_inactivo)
         self.btn_confirmar.setVisible(False)
         
-        if estado.count("|") >= 2:
+        estado_upper = estado.upper()
+
+        if "RECHAZAD" in estado_upper and "PESO" in estado_upper:
+            banner_txt = "ENVASE RECHAZADO"
+            veredicto_txt = "Por favor, vacie el liquido o retire la basura del interior."
+            boton_txt = "NONE"
+        elif "RECHAZAD" in estado_upper or "SUCIA" in estado_upper:
+            banner_txt = "ENVASE RECHAZADO"
+            veredicto_txt = "El objeto no cumple con los criterios de reciclaje."
+            boton_txt = "NONE"
+        elif "ERROR_BALANZA" in estado_upper:
+            banner_txt = "ERROR DE BALANZA"
+            veredicto_txt = "Fallo de comunicacion con el sensor de peso."
+            boton_txt = "NONE"
+        elif "RECICLAJE_EXITOSO" in estado_upper:
+            banner_txt = "RECICLAJE COMPLETADO"
+            veredicto_txt = "Envase procesado correctamente."
+            boton_txt = "NONE"
+        elif "ERROR_CICLO_ACTUADORES" in estado_upper:
+            banner_txt = "ERROR DE MECANISMO"
+            veredicto_txt = "Timeout o fallo en ciclo de actuadores."
+            boton_txt = "NONE"
+        elif estado.count("|") >= 2:
             partes = estado.split("|", 2)
             banner_txt = partes[0]
             veredicto_txt = partes[1]
@@ -280,29 +302,36 @@ class VentanaPrincipal(QMainWindow):
             banner_txt, veredicto_txt = estado.split("|", 1)
             boton_txt = "NONE"
         else:
-            banner_txt = "ESTADO DESCONOCIDO"
+            banner_txt = "ESTADO DEL SISTEMA"
             veredicto_txt = estado
             boton_txt = "NONE"
 
-        # Determinación de colores
-        banner_bg = "#808080"
-        inferior_color = "#808080"
-        
-        if "DISPONIBLE" in banner_txt:
-            banner_bg = "#808080"
+        # Determinacion de colores
+        banner_upper = banner_txt.upper()
+        veredicto_upper = veredicto_txt.upper()
+
+        if (
+            "RECHAZAD" in estado_upper
+            or "RECHAZAD" in banner_upper
+            or "RECHAZAD" in veredicto_upper
+            or "SUCIA" in veredicto_upper
+            or "ERROR" in estado_upper
+            or "ERROR" in banner_upper
+        ):
+            banner_bg = "#B91C1C"       # Rojo de rechazo / error
+            inferior_color = "#B91C1C"
+        elif "DISPONIBLE" in banner_upper or "ESPERANDO" in banner_upper:
+            banner_bg = "#808080"       # Gris de reposo
             inferior_color = "#808080"
-        elif "MOVIMIENTO MECÁNICO" in banner_txt or "ESPERE" in veredicto_txt.upper():
-            banner_bg = "#2563eb"  # Azul de Seguridad
-            inferior_color = "#2563eb"
-        elif "ACEPTADA" in veredicto_txt.upper():
-            banner_bg = "#008000"
-            inferior_color = "#008000"
-        elif "RECHAZADA" in veredicto_txt.upper() or "SUCIA" in veredicto_txt.upper():
-            banner_bg = "#800000"
-            inferior_color = "#800000"
+        elif "MOVIMIENTO MECÁNICO" in banner_upper or "MOVIMIENTO" in banner_upper or "ESPERE" in veredicto_upper or "PROCESANDO" in banner_upper:
+            banner_bg = "#2563EB"       # Azul de operacion mecanica
+            inferior_color = "#2563EB"
+        elif "ACEPTADA" in veredicto_upper or "ACEPTADO" in veredicto_upper or "EXITOSO" in estado_upper:
+            banner_bg = "#15803D"       # Verde de aceptacion
+            inferior_color = "#15803D"
         else:
-            banner_bg = "#808000"
-            inferior_color = "#808000"
+            banner_bg = "#B45309"       # Ambar de advertencia
+            inferior_color = "#B45309"
 
         self.lbl_banner.setStyleSheet(f"font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: {banner_bg}; padding: 10px;")
         self.lbl_veredicto_inferior.setStyleSheet(f"font-size: 20pt; font-weight: bold; color: {inferior_color};")
