@@ -227,6 +227,9 @@ class NodoActuadores(Node):
             10,
         )
 
+        # Publicacion continua de peso a 5 Hz cuando el sistema esta en reposo
+        self._timer_peso = self.create_timer(0.2, self._publicar_peso_periodico)
+
         self.get_logger().info(
             f"NodoActuadores inicializado correctamente\n"
             f"  GPIO Chip        : gpiochip{self._gpio_chip}\n"
@@ -237,6 +240,21 @@ class NodoActuadores(Node):
             f"  Max Botella      : {self._peso_max_botella}g\n"
             f"  Timeout Ciclo    : {self._timeout_ciclo}s"
         )
+
+    def _publicar_peso_periodico(self) -> None:
+        """
+        Publica periodicamente el peso actual en /peso_elemento cuando no hay ciclos de motor activos.
+        """
+        with self._lock:
+            if self._hilo_ciclo is not None and self._hilo_ciclo.is_alive():
+                return
+        try:
+            peso = self.balanza.get_units(3)
+            msg = Float32()
+            msg.data = float(peso)
+            self._pub_peso.publish(msg)
+        except Exception:
+            pass
 
     def _init_gpio(self) -> int:
         """

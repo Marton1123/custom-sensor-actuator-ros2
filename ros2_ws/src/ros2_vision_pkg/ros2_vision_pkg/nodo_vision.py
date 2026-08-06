@@ -168,10 +168,16 @@ class NodoVision(Node):
         self.sub_confirmacion = self.create_subscription(Empty, '/ui/confirmacion', self._cb_confirmacion, 10)
         self._confirmacion_recibida = False
 
+        self.sub_peso = self.create_subscription(Float32, '/peso_elemento', self._cb_peso, 10)
+        self._ultimo_peso: float = 0.0
+
         self.get_logger().info("Nodo_vision iniciado (FSM + SPoP). Esperando imagenes...")
 
     def _cb_confirmacion(self, msg: Empty):
         self._confirmacion_recibida = True
+
+    def _cb_peso(self, msg: Float32):
+        self._ultimo_peso = float(msg.data)
 
 
 
@@ -407,33 +413,67 @@ class NodoVision(Node):
                 area = (bx2 - bx1) * (by2 - by1) * self.k_area
                 self._grado_a_publicar = 0.0
 
-                if self._id_congelado == "bottle":
-                    self._estado_actual = 'ESPERA_CONFIRMACION'
+                if self._id_congelado == "can":
+                    clase_str = "LATA"
+                    max_peso = 40.0
+                    angulo = -90.0
+                else:
+                    clase_str = "BOTELLA"
+                    max_peso = 80.0
+                    angulo = 90.0
+
+                peso_actual = self._ultimo_peso
+
+                if peso_actual > max_peso:
+                    self._estado_actual = 'RECHAZO_PESO'
                     self._confirmacion_recibida = False
-                    self._ultimo_veredicto = "PROCESAMIENTO EN CURSO|BOTELLA ACEPTADA\n\nPresione CONFIRMAR para procesar.|CONFIRMAR Y GIRAR"
-                    self._grado_a_publicar = 90.0
+                    self._ultimo_veredicto = f"ENVASE RECHAZADO|Exceso de peso detectado ({peso_actual:.1f}g > {max_peso:.0f}g).\nPor favor, retire el envase.|NONE"
                     
                     self._frozen_seg_img = np.zeros((480, 640, 3), dtype=np.uint8)
-                    self._frozen_seg_img[:] = (0, 150, 0)
-                    text_size = cv2.getTextSize("BOTELLA ACEPTADA", cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3)[0]
-                    text_x = (640 - text_size[0]) // 2
-                    text_y = (480 + text_size[1]) // 2
-                    cv2.putText(self._frozen_seg_img, "BOTELLA ACEPTADA", (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
+                    self._frozen_seg_img[:] = (0, 0, 180)
+                    text1 = f"{clase_str} RECHAZADA"
+                    ts1 = cv2.getTextSize(text1, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)[0]
+                    tx1 = (640 - ts1[0]) // 2
+                    ty1 = (480 + ts1[1]) // 2 - 25
+                    cv2.putText(self._frozen_seg_img, text1, (tx1, ty1), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+                    
+                    text2 = f"EXCESO DE PESO: {peso_actual:.1f}g"
+                    ts2 = cv2.getTextSize(text2, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+                    tx2 = (640 - ts2[0]) // 2
+                    cv2.putText(self._frozen_seg_img, text2, (tx2, ty1 + 45), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 else:
                     self._estado_actual = 'ESPERA_CONFIRMACION'
                     self._confirmacion_recibida = False
-                    self._ultimo_veredicto = "PROCESAMIENTO EN CURSO|LATA ACEPTADA\n\nPresione CONFIRMAR para procesar.|CONFIRMAR Y GIRAR"
-                    self._grado_a_publicar = -90.0
-                    
+                    self._ultimo_veredicto = f"PROCESAMIENTO EN CURSO|{clase_str} ACEPTADA\n\nPresione CONFIRMAR para procesar.|CONFIRMAR Y GIRAR"
+                    self._grado_a_publicar = angulo
+
                     self._frozen_seg_img = np.zeros((480, 640, 3), dtype=np.uint8)
                     self._frozen_seg_img[:] = (0, 150, 0)
-                    text_size = cv2.getTextSize("LATA ACEPTADA", cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3)[0]
+                    text_size = cv2.getTextSize(f"{clase_str} ACEPTADA", cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3)[0]
                     text_x = (640 - text_size[0]) // 2
                     text_y = (480 + text_size[1]) // 2
-                    cv2.putText(self._frozen_seg_img, "LATA ACEPTADA", (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
+                    cv2.putText(self._frozen_seg_img, f"{clase_str} ACEPTADA", (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
                 
                 out_estado = self._ultimo_veredicto
                 self._frames_vacio = 0
+
+        elif self._estado_actual == 'RECHAZO_PESO':
+            out_raw = self._frame_congelado.copy()
+            out_estado = self._ultimo_veredicto
+            out_seg = self._frozen_seg_img.copy()
+
+            bx1, by1, bx2, by2 = map(int, self._box_congelado)
+            cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (0, 0, 255), 2)
+            clase_str = "LATA" if self._id_congelado == "can" else "BOTELLA"
+            cv2.putText(out_raw, f"RETIRE {clase_str}", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+            if best_obj in ["bottle", "can"] and best_score > 0.40:
+                self._frames_vacio = 0
+            else:
+                self._frames_vacio += 1
+
+            if self._frames_vacio >= 15:
+                self._estado_actual = 'RESETEO'
 
         elif self._estado_actual == 'ESPERA_CONFIRMACION':
             out_raw = self._frame_congelado.copy()

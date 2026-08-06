@@ -284,9 +284,6 @@ class VentanaPrincipal(QMainWindow):
         self._bloqueo_error = False
 
     def _actualizar_estado(self, estado: str) -> None:
-        if self._bloqueo_error:
-            return
-
         if self._ultimo_estado == estado:
             return
         self._ultimo_estado = estado
@@ -297,35 +294,23 @@ class VentanaPrincipal(QMainWindow):
         
         texto = estado.lower()
 
-        # ── Intercepcion prioritaria y blindada para rechazos (peso, error, suciedad) ──
-        if "rechaz" in texto or "peso" in texto or "error" in texto or "suci" in texto:
-            self._bloqueo_error = True
-
+        # Parseo de mensajes estructurados o directos de backend
+        if "rechaz" in texto or "exceso_peso" in texto:
             banner_txt = "ENVASE RECHAZADO"
-            veredicto_txt = "Exceso de peso o suciedad.\nRetire el envase."
-            banner_bg = "#B91C1C"
-            inferior_color = "#B91C1C"
-
-            self.lbl_banner.setStyleSheet(
-                f"font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: {banner_bg}; padding: 10px;"
-            )
-            self.lbl_veredicto_inferior.setStyleSheet(
-                f"font-size: 20pt; font-weight: bold; color: {inferior_color};"
-            )
-            self.lbl_banner.setText(banner_txt)
-            self.lbl_veredicto_inferior.setText(veredicto_txt)
-            self.btn_confirmar.setVisible(False)
-            self.btn_confirmar.setEnabled(False)
-
-            # Iniciar temporizador de reseteo automatico (4 segundos)
-            QTimer.singleShot(4000, self._reset_ui)
-            return
-
+            veredicto_txt = "Exceso de peso detectado.\nPor favor, retire el envase de la maquina."
+            boton_txt = "NONE"
+        elif "error_balanza" in texto:
+            banner_txt = "ERROR DE BALANZA"
+            veredicto_txt = "Fallo de comunicacion con el sensor de peso."
+            boton_txt = "NONE"
+        elif "error_ciclo_actuadores" in texto:
+            banner_txt = "ERROR DE MECANISMO"
+            veredicto_txt = "Timeout o fallo en ciclo de actuadores."
+            boton_txt = "NONE"
         elif "reciclaje_exitoso" in texto:
             banner_txt = "RECICLAJE COMPLETADO"
             veredicto_txt = "Envase procesado correctamente."
             boton_txt = "NONE"
-            QTimer.singleShot(3000, self._reset_ui)
         elif estado.count("|") >= 2:
             partes = estado.split("|", 2)
             banner_txt = partes[0]
@@ -339,20 +324,22 @@ class VentanaPrincipal(QMainWindow):
             veredicto_txt = estado
             boton_txt = "NONE"
 
-        # Determinacion de colores para estados no rechazados
-        estado_upper = estado.upper()
+        # Determinacion sistematica de colores
         banner_upper = banner_txt.upper()
         veredicto_upper = veredicto_txt.upper()
 
-        if "DISPONIBLE" in banner_upper or "ESPERANDO" in banner_upper:
-            banner_bg = "#808080"       # Gris de reposo
-            inferior_color = "#808080"
-        elif "MOVIMIENTO MECÁNICO" in banner_upper or "MOVIMIENTO" in banner_upper or "ESPERE" in veredicto_upper or "PROCESANDO" in banner_upper:
-            banner_bg = "#2563EB"       # Azul de operacion mecanica
-            inferior_color = "#2563EB"
-        elif "ACEPTADA" in veredicto_upper or "ACEPTADO" in veredicto_upper or "EXITOSO" in estado_upper:
+        if "RECHAZ" in banner_upper or "RECHAZ" in veredicto_upper or "ERROR" in banner_upper:
+            banner_bg = "#B91C1C"       # Rojo de rechazo / error
+            inferior_color = "#B91C1C"
+        elif "ACEPTADA" in veredicto_upper or "ACEPTADO" in veredicto_upper or "EXITOSO" in banner_upper:
             banner_bg = "#15803D"       # Verde de aceptacion
             inferior_color = "#15803D"
+        elif "DISPONIBLE" in banner_upper or "ESPERANDO" in banner_upper:
+            banner_bg = "#808080"       # Gris de reposo
+            inferior_color = "#808080"
+        elif "MOVIMIENTO" in banner_upper or "PROCESANDO" in banner_upper or "ESTABILIZANDO" in veredicto_upper:
+            banner_bg = "#2563EB"       # Azul de operacion en curso
+            inferior_color = "#2563EB"
         else:
             banner_bg = "#B45309"       # Ambar de advertencia
             inferior_color = "#B45309"

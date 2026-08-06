@@ -8,3 +8,13 @@ IA/data/_fiftyone_zoo/*
 !IA/data/_fiftyone_zoo/.gitkeep
 
 data/processed/
+
+# Python y ROS 2 build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+install/
+log/
+.pytest_cache/
+
