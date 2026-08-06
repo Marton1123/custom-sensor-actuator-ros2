@@ -2,14 +2,14 @@
 """
 nodo_actuadores.py
 ==================
-Nodo ROS 2 para control de actuadores, ciclo continuo unidireccional de 360 grados y
-validacion de peso mediante celda de carga (HX711) sobre Raspberry Pi 5 (lgpio).
+Nodo ROS 2 para control de actuadores, validacion de peso de envases (HX711)
+y ciclo continuo unidireccional de 360 grados con micro-centrado IR (Raspberry Pi 5 / lgpio).
 
 Arquitectura DevSecOps:
-    - Controladores de hardware desacoplados con timeout estricto.
-    - Ejecucion de la maquina de estados en worker thread para evitar bloqueo del executor ROS 2.
-    - Sensor Fusion: Habilitacion de reciclaje condicionada a validacion de peso HX711 (Peso <= Umbral).
-    - Ciclo Cerrado Unidireccional 360° (Escape -> Trayecto continuo -> Anclaje IR) sin inversiones de marcha.
+    - Controladores de hardware desacoplados con proteccion contra bloqueos.
+    - Ejecucion de la maquina de estados en worker thread para preservar la reactividad del executor ROS 2.
+    - Fase 0 (Compuerta Logica): Validacion de peso mediante celda de carga HX711 calibrada (Lata vs Botella).
+    - Ciclo 360 Unidireccional: Escape -> Trayecto continuo -> Auto-ajuste de anclaje IR (0-0).
 """
 
 import time
@@ -34,13 +34,17 @@ from std_msgs.msg import Float32, String
 # PARAMETROS Y CONSTANTES GLOBALES DE CALIBRACION
 # ============================================================================
 # Calibracion empirica de celda de carga HX711
-DEFAULT_HX711_OFFSET: float = 0.0
-DEFAULT_HX711_REFERENCE_UNIT: float = 2273.9  # Factor ADC -> gramos
-DEFAULT_UMBRAL_PESO_MAX: float = 40.0         # Gramos (envase limpio)
+DEFAULT_HX711_SCALE: float = 2039.0          # Factor ADC -> gramos
+
+# Umbrales de peso por tipo de elemento (Gramos)
+DEFAULT_PESO_MIN_LATA: float = 2.0
+DEFAULT_PESO_MAX_LATA: float = 30.0
+DEFAULT_PESO_MIN_BOTELLA: float = 5.0
+DEFAULT_PESO_MAX_BOTELLA: float = 65.0
 
 # Parametros de dinamica de actuadores y ciclo de reciclaje
-DEFAULT_PULSO_INERCIA: float = 0.005          # Pulso de gracia / inercia (5 ms)
-DEFAULT_TIMEOUT_CICLO: float = 20.0           # Timeout maximo de ciclo completo (20 s)
+DEFAULT_PULSO_INERCIA: float = 0.005         # Pulso de gracia / inercia (5 ms)
+DEFAULT_TIMEOUT_CICLO: float = 20.0          # Timeout maximo de ciclo completo (20 s)
 
 # Definiciones de estados de sentido de giro
 DIR_DERECHA: Tuple[int, int, int, int] = (1, 0, 1, 0)
@@ -48,34 +52,28 @@ DIR_IZQUIERDA: Tuple[int, int, int, int] = (0, 1, 0, 1)
 DIR_STOP: Tuple[int, int, int, int] = (0, 0, 0, 0)
 
 
-class HX711DriverLGPIO:
+class HX711:
     """
-    Controlador de bajo nivel para convertidor ADC HX711 mediante bit-banging en lgpio.
-    Diseñado para operar en Raspberry Pi 5 sin bloqueos indefinidos de hardware.
+    Controlador optimizado para convertidor ADC HX711 sobre Raspberry Pi 5 mediante lgpio.
+    Implementa bit-banging sincrono, tara y conversion a unidades con timeout no bloqueante.
     """
 
-    def __init__(self, handle: int, dt_pin: int, sck_pin: int, gain: int = 128) -> None:
-        self._h = handle
-        self._dt = dt_pin
-        self._sck = sck_pin
-        self._gain = gain
-        self._offset: float = DEFAULT_HX711_OFFSET
+    def __init__(self, dt_pin: int, sck_pin: int, chip_handle: int) -> None:
+        self.dt = dt_pin
+        self.sck = sck_pin
+        self.h = chip_handle
+        lgpio.gpio_claim_output(self.h, self.sck)
+        lgpio.gpio_write(self.h, self.sck, 0)
+        lgpio.gpio_claim_input(self.h, self.dt)
+        self.offset: float = 0.0
+        self.scale: float = 1.0
 
-        if self._gain == 128:
-            self._extra_pulses = 1
-        elif self._gain == 64:
-            self._extra_pulses = 3
-        elif self._gain == 32:
-            self._extra_pulses = 2
-        else:
-            self._extra_pulses = 1
-
-    def is_ready(self, timeout: float = 0.3) -> bool:
+    def is_ready(self, timeout: float = 0.5) -> bool:
         """
-        Espera no bloqueante a que el pin DT baje a LOW.
+        Verifica si el pin DT bajo a nivel logico 0 (listo para lectura).
         """
         t0 = time.time()
-        while lgpio.gpio_read(self._h, self._dt) != 0:
+        while lgpio.gpio_read(self.h, self.dt) != 0:
             if time.time() - t0 > timeout:
                 return False
             time.sleep(0.001)
@@ -83,69 +81,62 @@ class HX711DriverLGPIO:
 
     def read_raw(self) -> int:
         """
-        Lee 24 bits crudos en complemento a dos desde el HX711.
+        Lee 24 bits de datos en complemento a dos desde el HX711.
         """
         if not self.is_ready():
-            raise TimeoutError("Timeout en comunicacion con hardware HX711")
+            raise TimeoutError("Timeout en comunicacion con hardware HX711 (pin DT)")
 
-        value = 0
+        data = 0
+        write = lgpio.gpio_write
+        read = lgpio.gpio_read
+        h, sck, dt = self.h, self.sck, self.dt
+
         for _ in range(24):
-            lgpio.gpio_write(self._h, self._sck, 1)
-            lgpio.gpio_write(self._h, self._sck, 0)
-            bit = lgpio.gpio_read(self._h, self._dt)
-            value = (value << 1) | (bit & 1)
+            write(h, sck, 1)
+            data = (data << 1) | read(h, dt)
+            write(h, sck, 0)
 
-        for _ in range(self._extra_pulses):
-            lgpio.gpio_write(self._h, self._sck, 1)
-            lgpio.gpio_write(self._h, self._sck, 0)
+        # Pulso 25 para fijar ganancia a 128 canal A
+        write(h, sck, 1)
+        write(h, sck, 0)
 
-        if value & 0x800000:
-            value -= 0x1000000
+        if data & 0x800000:
+            data -= 0x1000000
 
-        return value
+        return data
 
-    def read_average(self, times: int = 3) -> float:
+    def tare(self, times: int = 15) -> None:
         """
-        Toma multiples muestras descartando errores de timeout.
+        Establece el cero relativo del sensor promediando lecturas crudas.
         """
-        suma = 0.0
-        exitos = 0
-        for _ in range(times):
-            try:
-                suma += self.read_raw()
-                exitos += 1
-            except TimeoutError:
-                pass
-            time.sleep(0.005)
+        suma = sum(self.read_raw() for _ in range(times))
+        self.offset = suma / times
 
-        if exitos == 0:
-            raise RuntimeError("Fallo de lectura en celda de carga HX711")
-
-        return suma / exitos
-
-    def set_offset(self, offset: float) -> None:
-        self._offset = offset
-
-    def get_offset(self) -> float:
-        return self._offset
-
-    def get_weight(self, reference_unit: float, times: int = 3) -> float:
+    def set_scale(self, scale: float) -> None:
         """
-        Calcula el peso neto en gramos aplicando tara y factor de escala.
+        Asigna el factor de escala de calibracion ADC -> Gramos.
         """
-        raw = self.read_average(times=times)
-        if reference_unit == 0.0:
-            raise ValueError("reference_unit no puede ser cero")
-        return (raw - self._offset) / reference_unit
+        self.scale = scale
+
+    def get_units(self, times: int = 5) -> float:
+        """
+        Obtiene el peso neto en gramos promediado.
+        """
+        if self.scale == 0.0:
+            raise ValueError("scale no puede ser cero")
+        suma = sum(self.read_raw() - self.offset for _ in range(times))
+        return (suma / times) / self.scale
 
 
 class NodoActuadores(Node):
     """
-    Nodo ROS 2 orquestador de actuadores y Sensor Fusion (IR + HX711).
+    Nodo ROS 2 orquestador de actuadores y Sensor Fusion (Balanza HX711 + Sensores IR).
     """
 
     TOPIC_COMANDO_GRADOS = "/comando_grados"
     TOPIC_OBJETO_DETECTADO = "/objeto_detectado"
+    TOPIC_PESO_ELEMENTO = "/peso_elemento"
+    TOPIC_ESTADO_RECICLAJE = "/clasificacion_objeto"
 
     def __init__(self) -> None:
         super().__init__("nodo_actuadores")
@@ -158,16 +149,20 @@ class NodoActuadores(Node):
 
         # ── Declaracion de Parametros ROS 2 ─────────────────────────────────
         self.declare_parameter("gpio_chip", 4)
-        self.declare_parameter("umbral_peso_max", DEFAULT_UMBRAL_PESO_MAX)
-        self.declare_parameter("hx711_offset", DEFAULT_HX711_OFFSET)
-        self.declare_parameter("hx711_reference_unit", DEFAULT_HX711_REFERENCE_UNIT)
+        self.declare_parameter("hx711_scale", DEFAULT_HX711_SCALE)
+        self.declare_parameter("peso_min_lata", DEFAULT_PESO_MIN_LATA)
+        self.declare_parameter("peso_max_lata", DEFAULT_PESO_MAX_LATA)
+        self.declare_parameter("peso_min_botella", DEFAULT_PESO_MIN_BOTELLA)
+        self.declare_parameter("peso_max_botella", DEFAULT_PESO_MAX_BOTELLA)
         self.declare_parameter("pulso_inercia", DEFAULT_PULSO_INERCIA)
         self.declare_parameter("timeout_ciclo", DEFAULT_TIMEOUT_CICLO)
 
         self._gpio_chip = self.get_parameter("gpio_chip").value
-        self._umbral_peso_max = float(self.get_parameter("umbral_peso_max").value)
-        self._hx711_offset = float(self.get_parameter("hx711_offset").value)
-        self._hx711_reference_unit = float(self.get_parameter("hx711_reference_unit").value)
+        self._hx711_scale = float(self.get_parameter("hx711_scale").value)
+        self._peso_min_lata = float(self.get_parameter("peso_min_lata").value)
+        self._peso_max_lata = float(self.get_parameter("peso_max_lata").value)
+        self._peso_min_botella = float(self.get_parameter("peso_min_botella").value)
+        self._peso_max_botella = float(self.get_parameter("peso_max_botella").value)
         self._pulso_inercia = float(self.get_parameter("pulso_inercia").value)
         self._timeout_ciclo = float(self.get_parameter("timeout_ciclo").value)
 
@@ -191,12 +186,21 @@ class NodoActuadores(Node):
         self._cancelar = threading.Event()
         self._lock = threading.Lock()
 
-        # ── Inicializacion de Hardware GPIO ────────────────────────────────
+        # ── Inicializacion de Hardware GPIO y Balanza HX711 ────────────────
         self._h = self._init_gpio()
-        self._hx711 = HX711DriverLGPIO(self._h, self.HX711_DT, self.HX711_SCK)
-        self._hx711.set_offset(self._hx711_offset)
+        self.balanza = HX711(dt_pin=self.HX711_DT, sck_pin=self.HX711_SCK, chip_handle=self._h)
+        self.balanza.set_scale(self._hx711_scale)
 
-        # ── QoS y Suscripciones ───────────────────────────────────────────
+        self.get_logger().info("Ejecutando tara inicial de balanza HX711 (peso de brazo = 0g)...")
+        try:
+            self.balanza.tare(15)
+            self.get_logger().info(
+                f"Tara completada. Offset={self.balanza.offset:.1f}, Escala={self.balanza.scale:.1f}"
+            )
+        except Exception as exc:
+            self.get_logger().error(f"Fallo en tara inicial HX711: {exc}")
+
+        # ── QoS, Suscripciones y Publicadores ──────────────────────────────
         qos = QoSProfile(
             depth=10,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -217,19 +221,32 @@ class NodoActuadores(Node):
             qos,
         )
 
+        self._pub_peso = self.create_publisher(
+            Float32,
+            self.TOPIC_PESO_ELEMENTO,
+            10,
+        )
+
+        self._pub_estado = self.create_publisher(
+            String,
+            self.TOPIC_ESTADO_RECICLAJE,
+            10,
+        )
+
         self.get_logger().info(
             f"NodoActuadores inicializado correctamente\n"
             f"  GPIO Chip        : gpiochip{self._gpio_chip}\n"
             f"  Motores          : M1(IN1={self.IN1}, IN2={self.IN2}), M2(IN3={self.IN3}, IN4={self.IN4})\n"
             f"  Sensores IR      : Izq=GPIO{self.SENSOR_IZQ}, Der=GPIO{self.SENSOR_DER} (PULL_UP)\n"
-            f"  HX711 Balanza    : DT=GPIO{self.HX711_DT}, SCK=GPIO{self.HX711_SCK} (Umbral: {self._umbral_peso_max}g)\n"
-            f"  Timeout Ciclo    : {self._timeout_ciclo}s\n"
-            f"  Suscripciones    : '{self.TOPIC_COMANDO_GRADOS}', '{self.TOPIC_OBJETO_DETECTADO}'"
+            f"  HX711 Balanza    : DT=GPIO{self.HX711_DT}, SCK=GPIO{self.HX711_SCK} (Escala: {self._hx711_scale})\n"
+            f"  Limites Lata     : ({self._peso_min_lata}g - {self._peso_max_lata}g]\n"
+            f"  Limites Botella  : ({self._peso_min_botella}g - {self._peso_max_botella}g]\n"
+            f"  Timeout Ciclo    : {self._timeout_ciclo}s"
         )
 
     def _init_gpio(self) -> int:
         """
-        Reclama y configura todos los pines GPIO de forma segura.
+        Reclama y configura los pines GPIO de motores y sensores IR.
         Los sensores IR se configuran obligatoriamente con resistencia interna PULL_UP.
         """
         handle = lgpio.gpiochip_open(self._gpio_chip)
@@ -244,16 +261,12 @@ class NodoActuadores(Node):
         lgpio.gpio_claim_input(handle, self.SENSOR_IZQ, lgpio.SET_PULL_UP)
         lgpio.gpio_claim_input(handle, self.SENSOR_DER, lgpio.SET_PULL_UP)
 
-        # Pines de comunicacion HX711
-        lgpio.gpio_claim_input(handle, self.HX711_DT)
-        lgpio.gpio_claim_output(handle, self.HX711_SCK, 0)
-
         return handle
 
     def _cb_comando_grados(self, msg: Float32) -> None:
         """
         Procesa comandos por angulo.
-        El ciclo cerrado maneja el retorno a 0 de forma autonoma;
+        El ciclo cerrado maneja el recorrido completo de 360 grados de forma autonoma;
         los comandos intermedios de 0.0 recibidos durante la ejecucion se ignoran.
         """
         comando = msg.data
@@ -292,7 +305,7 @@ class NodoActuadores(Node):
 
     def _lanzar_ciclo_reciclaje(self, accion: str) -> None:
         """
-        Cancela cualquier movimiento previo y ejecuta el ciclo 360 en un worker thread.
+        Cancela cualquier movimiento previo y ejecuta el ciclo de lazo cerrado en un worker thread.
         """
         self._cancelar.set()
 
@@ -316,37 +329,58 @@ class NodoActuadores(Node):
         """
         Maquina de estados para Sensor Fusion y ejecucion del ciclo de reciclaje continuo de 360 grados.
         """
-        self.get_logger().info(f"Iniciando ciclo unidireccional 360 de reciclaje para {accion}")
+        self.get_logger().info(f"Iniciando ciclo de reciclaje para accion: {accion}")
 
-        # 1. Validacion de Limpieza con Balanza HX711
-        self.get_logger().info("Validando peso del envase con celda de carga...")
-        limpio_ok, peso_medido = self._validar_peso()
-        if not limpio_ok:
-            self.get_logger().warning(
-                f"Rechazado: Envase contaminado (Peso={peso_medido:.2f}g > Umbral={self._umbral_peso_max}g)."
-            )
+        # ────────────────────────────────────────────────────────────────────
+        # FASE 0: VALIDACION DE PESO (Compuerta Logica de Seguridad)
+        # ────────────────────────────────────────────────────────────────────
+        self.get_logger().info("Fase 0: Validando peso del envase con celda de carga HX711...")
+        try:
+            peso_actual = self.balanza.get_units(5)
+            self.get_logger().info(f"Lectura de peso actual: {peso_actual:.2f} g")
+            self._pub_peso.publish(Float32(data=float(peso_actual)))
+        except Exception as exc:
+            self.get_logger().error(f"Fallo de lectura en sensor HX711: {exc}")
+            self._pub_estado.publish(String(data="ERROR_BALANZA"))
             self._frenar_motores()
             return
 
-        self.get_logger().info(
-            f"Sensor Fusion OK (Peso={peso_medido:.2f}g <= {self._umbral_peso_max}g). Habilitando giro 360."
-        )
-
-        # 2. Mapeo de direccion de giro continuo unidireccional
+        # Validacion de rangos especificos segun tipo de elemento
         if accion == "GIRAR_LATA":
+            peso_valido = self._peso_min_lata < peso_actual <= self._peso_max_lata
+            rango_esperado = f"({self._peso_min_lata}g - {self._peso_max_lata}g]"
             direccion_ida = DIR_IZQUIERDA
         elif accion == "GIRAR_BOTELLA":
+            peso_valido = self._peso_min_botella < peso_actual <= self._peso_max_botella
+            rango_esperado = f"({self._peso_min_botella}g - {self._peso_max_botella}g]"
             direccion_ida = DIR_DERECHA
         else:
             self.get_logger().error(f"Accion desconocida: {accion}")
             return
 
-        # 3. Ejecucion del ciclo 360 continuo ininterrumpido
+        if not peso_valido:
+            self.get_logger().error(
+                f"Envase rechazado por exceso de peso. Retire el envase. "
+                f"(Peso={peso_actual:.2f}g fuera del rango {rango_esperado})"
+            )
+            self._pub_estado.publish(String(data="RECHAZADO_EXCESO_PESO"))
+            self._frenar_motores()
+            return
+
+        self.get_logger().info(
+            f"Fase 0 superada con exito ({peso_actual:.2f}g en rango {rango_esperado}). Iniciando giro 360."
+        )
+
+        # ────────────────────────────────────────────────────────────────────
+        # FASES 1-3: CICLO 360 CONTINUO UNIDIRECCIONAL
+        # ────────────────────────────────────────────────────────────────────
         exito = self._ejecutar_ciclo_expulsion(direccion_ida)
         if exito:
             self.get_logger().info(f"Ciclo 360 de reciclaje ({accion}) completado exitosamente.")
+            self._pub_estado.publish(String(data="RECICLAJE_EXITOSO"))
         else:
             self.get_logger().warning(f"Ciclo 360 de reciclaje ({accion}) finalizo con errores o timeout.")
+            self._pub_estado.publish(String(data="ERROR_CICLO_ACTUADORES"))
 
     def _ejecutar_ciclo_expulsion(
         self, direccion_ida: Tuple[int, int, int, int]
@@ -355,7 +389,7 @@ class NodoActuadores(Node):
         Ejecuta el ciclo continuo unidireccional de 360 grados:
             1. Fase de Escape: Giro continuo en direccion_ida hasta detectar 1-1 (salida del nido central).
             2. Fase de Trayecto: Giro continuo en la MISMA direccion (caida libre del envase) hasta detectar blanco.
-            3. Fase de Anclaje: Micro-centrado continuo hasta 0-0 con pulso de inercia y frenado.
+            3. Fase de Anclaje: Bucle de auto-ajuste continuo hasta 0-0 con pulso de inercia y frenado.
         """
         t_inicio = time.time()
         timeout = self._timeout_ciclo
@@ -460,20 +494,6 @@ class NodoActuadores(Node):
         self.get_logger().warning("Timeout en Fase 3 (Anclaje). Abortando ciclo.")
         self._frenar_motores()
         return False
-
-    def _validar_peso(self) -> Tuple[bool, float]:
-        """
-        Lee el peso del envase y valida contra el umbral permitido.
-        """
-        try:
-            peso = self._hx711.get_weight(self._hx711_reference_unit, times=3)
-            self.get_logger().info(f"Lectura de peso: {peso:.2f} g")
-            if peso <= self._umbral_peso_max:
-                return True, peso
-            return False, peso
-        except Exception as exc:
-            self.get_logger().error(f"Error leyendo sensor HX711: {exc}")
-            return False, 999.0
 
     def _aplicar_estado_motores(self, m1_in1: int, m1_in2: int, m2_in3: int, m2_in4: int) -> None:
         """
