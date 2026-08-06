@@ -181,6 +181,7 @@ class VentanaPrincipal(QMainWindow):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self._build_ui()
         self._ultimo_estado = "vacio"
+        self._bloqueo_error: bool = False
 
         self.senal_frame_raw.connect(self._actualizar_raw)
         self.senal_frame_seg.connect(self._actualizar_seg)
@@ -280,8 +281,12 @@ class VentanaPrincipal(QMainWindow):
         self.lbl_veredicto_inferior.setText("Inserte una lata o botella en el centro.")
         self.btn_confirmar.setVisible(False)
         self.btn_confirmar.setEnabled(False)
+        self._bloqueo_error = False
 
     def _actualizar_estado(self, estado: str) -> None:
+        if self._bloqueo_error:
+            return
+
         if self._ultimo_estado == estado:
             return
         self._ultimo_estado = estado
@@ -292,10 +297,12 @@ class VentanaPrincipal(QMainWindow):
         
         texto = estado.lower()
 
-        # ── Intercepcion prioritaria y blindada para rechazos (peso, suciedad, rechazo generico) ──
-        if "rechaz" in texto or "peso" in texto or "suci" in texto:
+        # ── Intercepcion prioritaria y blindada para rechazos (peso, error, suciedad) ──
+        if "rechaz" in texto or "peso" in texto or "error" in texto or "suci" in texto:
+            self._bloqueo_error = True
+
             banner_txt = "ENVASE RECHAZADO"
-            veredicto_txt = "Por favor, vacie el liquido\no retire la basura del interior."
+            veredicto_txt = "Exceso de peso o suciedad.\nRetire el envase."
             banner_bg = "#B91C1C"
             inferior_color = "#B91C1C"
 
@@ -314,21 +321,11 @@ class VentanaPrincipal(QMainWindow):
             QTimer.singleShot(4000, self._reset_ui)
             return
 
-        elif "error_balanza" in texto:
-            banner_txt = "ERROR DE BALANZA"
-            veredicto_txt = "Fallo de comunicacion con el sensor de peso."
-            boton_txt = "NONE"
-            QTimer.singleShot(4000, self._reset_ui)
         elif "reciclaje_exitoso" in texto:
             banner_txt = "RECICLAJE COMPLETADO"
             veredicto_txt = "Envase procesado correctamente."
             boton_txt = "NONE"
             QTimer.singleShot(3000, self._reset_ui)
-        elif "error_ciclo_actuadores" in texto:
-            banner_txt = "ERROR DE MECANISMO"
-            veredicto_txt = "Timeout o fallo en ciclo de actuadores."
-            boton_txt = "NONE"
-            QTimer.singleShot(4000, self._reset_ui)
         elif estado.count("|") >= 2:
             partes = estado.split("|", 2)
             banner_txt = partes[0]
@@ -347,10 +344,7 @@ class VentanaPrincipal(QMainWindow):
         banner_upper = banner_txt.upper()
         veredicto_upper = veredicto_txt.upper()
 
-        if "ERROR" in estado_upper or "ERROR" in banner_upper:
-            banner_bg = "#B91C1C"       # Rojo de error
-            inferior_color = "#B91C1C"
-        elif "DISPONIBLE" in banner_upper or "ESPERANDO" in banner_upper:
+        if "DISPONIBLE" in banner_upper or "ESPERANDO" in banner_upper:
             banner_bg = "#808080"       # Gris de reposo
             inferior_color = "#808080"
         elif "MOVIMIENTO MECÁNICO" in banner_upper or "MOVIMIENTO" in banner_upper or "ESPERE" in veredicto_upper or "PROCESANDO" in banner_upper:
