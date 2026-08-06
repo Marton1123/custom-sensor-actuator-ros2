@@ -453,7 +453,7 @@ class NodoVision(Node):
                         throttle_duration_sec=2.0,
                     )
                     out_estado = self._ultimo_veredicto
-                elif peso_actual > max_peso:
+                elif abs(peso_actual) > max_peso:
                     self._estado_actual = 'RECHAZO_PESO'
                     self._confirmacion_recibida = False
                     self._ultimo_veredicto = (
@@ -505,7 +505,14 @@ class NodoVision(Node):
             else:
                 self._frames_vacio += 1
 
-            if self._frames_vacio >= 15:
+            limite_rechazo = 30.0 if self._id_congelado == "can" else 65.0
+            peso_seguro = (
+                self._ultimo_peso is not None
+                and math.isfinite(self._ultimo_peso)
+                and abs(self._ultimo_peso) <= limite_rechazo
+            )
+
+            if self._frames_vacio >= 15 and peso_seguro:
                 self._estado_actual = 'RESETEO'
 
         elif self._estado_actual == 'ESPERA_CONFIRMACION':

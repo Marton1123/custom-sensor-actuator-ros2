@@ -43,12 +43,6 @@ QFrame#frame_principal {{
 }}
 """
 
-ESTILO_FRAME_ERROR = f"""
-QFrame#frame_principal {{
-    background-color: {COLOR_ERROR};
-}}
-"""
-
 STYLESHEET = f"""
 QMainWindow, QWidget {{
     background-color: {WIN95_GRAY};
@@ -195,6 +189,7 @@ class VentanaPrincipal(QMainWindow):
         self._build_ui()
         self._ultimo_estado = "vacio"
         self.bloqueo_error: bool = False
+        self._error_peso_persistente: bool = False
 
         self._timer_error = QTimer(self)
         self._timer_error.setSingleShot(True)
@@ -322,6 +317,26 @@ class VentanaPrincipal(QMainWindow):
         self.btn_confirmar.setEnabled(False)
         self.btn_confirmar.setStyleSheet(self._estilo_btn_inactivo)
         self.bloqueo_error = False
+        self._error_peso_persistente = False
+
+    @staticmethod
+    def _es_rechazo_peso(estado: str) -> bool:
+        texto = estado.casefold().replace("-", "_")
+        return (
+            "rechazo_por_peso" in texto
+            or "rechazado_exceso_peso" in texto
+            or "exceso de peso" in texto
+            or "exceso_peso" in texto
+        )
+
+    @staticmethod
+    def _es_estado_rearme(estado: str) -> bool:
+        texto = estado.casefold()
+        return (
+            "sistema disponible" in texto
+            or "esperando envase" in texto
+            or "esperando elemento" in texto
+        )
 
     @staticmethod
     def _es_estado_error(estado: str) -> bool:
@@ -342,12 +357,13 @@ class VentanaPrincipal(QMainWindow):
         texto = estado.casefold()
         self._timer_exito.stop()
         self.bloqueo_error = True
+        self._error_peso_persistente = self._es_rechazo_peso(estado)
         self._ultimo_estado = estado
 
-        # Reset absoluto: se descarta cualquier hoja de estilo previa antes de
-        # pintar el frame y ambos textos con el color de error.
+        # Mantener neutro el frame general: sólo el banner y la instrucción
+        # representan visualmente el rechazo.
         self.frame_principal.setStyleSheet("")
-        self.frame_principal.setStyleSheet(ESTILO_FRAME_ERROR)
+        self.frame_principal.setStyleSheet(ESTILO_FRAME_NEUTRO)
         estilo_estado_error = (
             f"font-size: 24px; font-weight: bold; color: #FFFFFF; "
             f"background-color: {COLOR_ERROR}; padding: 10px;"
@@ -378,12 +394,17 @@ class VentanaPrincipal(QMainWindow):
         self.btn_confirmar.setVisible(False)
         self.btn_confirmar.setEnabled(False)
         self.btn_confirmar.setStyleSheet(self._estilo_btn_inactivo)
-        self._timer_error.start()
+        if self._error_peso_persistente:
+            self._timer_error.stop()
+        else:
+            self._timer_error.start()
 
     def _actualizar_estado(self, estado: str) -> None:
         # Durante la pantalla roja se descartan incluso mensajes validos de la
         # camara. Asi ningun estado tardio puede repintar la interfaz en verde.
         if self.bloqueo_error:
+            if self._error_peso_persistente and self._es_estado_rearme(estado):
+                self._reset_ui()
             return
 
         if self._ultimo_estado == estado:

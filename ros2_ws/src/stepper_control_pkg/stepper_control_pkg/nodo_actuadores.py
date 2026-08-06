@@ -14,6 +14,7 @@ Arquitectura DevSecOps:
 
 import time
 import threading
+import math
 from typing import Optional, Tuple
 
 try:
@@ -363,11 +364,11 @@ class NodoActuadores(Node):
 
         # Validacion de rangos especificos segun tipo de elemento (solo limite superior de proteccion)
         if accion == "GIRAR_LATA":
-            peso_valido = peso_actual <= self._peso_max_lata
+            peso_valido = math.isfinite(peso_actual) and 0.0 <= peso_actual <= self._peso_max_lata
             limite_max = self._peso_max_lata
             direccion_ida = DIR_IZQUIERDA
         elif accion == "GIRAR_BOTELLA":
-            peso_valido = peso_actual <= self._peso_max_botella
+            peso_valido = math.isfinite(peso_actual) and 0.0 <= peso_actual <= self._peso_max_botella
             limite_max = self._peso_max_botella
             direccion_ida = DIR_DERECHA
         else:
