@@ -36,11 +36,9 @@ from std_msgs.msg import Float32, String
 # Calibracion empirica de celda de carga HX711
 DEFAULT_HX711_SCALE: float = 2039.0          # Factor ADC -> gramos
 
-# Umbrales de peso por tipo de elemento (Gramos)
-DEFAULT_PESO_MIN_LATA: float = 2.0
-DEFAULT_PESO_MAX_LATA: float = 30.0
-DEFAULT_PESO_MIN_BOTELLA: float = 5.0
-DEFAULT_PESO_MAX_BOTELLA: float = 65.0
+# Umbrales maximos de peso de seguridad (Gramos)
+DEFAULT_PESO_MAX_LATA: float = 40.0
+DEFAULT_PESO_MAX_BOTELLA: float = 80.0
 
 # Parametros de dinamica de actuadores y ciclo de reciclaje
 DEFAULT_PULSO_INERCIA: float = 0.005         # Pulso de gracia / inercia (5 ms)
@@ -150,18 +148,14 @@ class NodoActuadores(Node):
         # ── Declaracion de Parametros ROS 2 ─────────────────────────────────
         self.declare_parameter("gpio_chip", 4)
         self.declare_parameter("hx711_scale", DEFAULT_HX711_SCALE)
-        self.declare_parameter("peso_min_lata", DEFAULT_PESO_MIN_LATA)
         self.declare_parameter("peso_max_lata", DEFAULT_PESO_MAX_LATA)
-        self.declare_parameter("peso_min_botella", DEFAULT_PESO_MIN_BOTELLA)
         self.declare_parameter("peso_max_botella", DEFAULT_PESO_MAX_BOTELLA)
         self.declare_parameter("pulso_inercia", DEFAULT_PULSO_INERCIA)
         self.declare_parameter("timeout_ciclo", DEFAULT_TIMEOUT_CICLO)
 
         self._gpio_chip = self.get_parameter("gpio_chip").value
         self._hx711_scale = float(self.get_parameter("hx711_scale").value)
-        self._peso_min_lata = float(self.get_parameter("peso_min_lata").value)
         self._peso_max_lata = float(self.get_parameter("peso_max_lata").value)
-        self._peso_min_botella = float(self.get_parameter("peso_min_botella").value)
         self._peso_max_botella = float(self.get_parameter("peso_max_botella").value)
         self._pulso_inercia = float(self.get_parameter("pulso_inercia").value)
         self._timeout_ciclo = float(self.get_parameter("timeout_ciclo").value)
@@ -239,8 +233,8 @@ class NodoActuadores(Node):
             f"  Motores          : M1(IN1={self.IN1}, IN2={self.IN2}), M2(IN3={self.IN3}, IN4={self.IN4})\n"
             f"  Sensores IR      : Izq=GPIO{self.SENSOR_IZQ}, Der=GPIO{self.SENSOR_DER} (PULL_UP)\n"
             f"  HX711 Balanza    : DT=GPIO{self.HX711_DT}, SCK=GPIO{self.HX711_SCK} (Escala: {self._hx711_scale})\n"
-            f"  Limites Lata     : ({self._peso_min_lata}g - {self._peso_max_lata}g]\n"
-            f"  Limites Botella  : ({self._peso_min_botella}g - {self._peso_max_botella}g]\n"
+            f"  Max Lata         : {self._peso_max_lata}g\n"
+            f"  Max Botella      : {self._peso_max_botella}g\n"
             f"  Timeout Ciclo    : {self._timeout_ciclo}s"
         )
 
@@ -345,14 +339,14 @@ class NodoActuadores(Node):
             self._frenar_motores()
             return
 
-        # Validacion de rangos especificos segun tipo de elemento
+        # Validacion de rangos especificos segun tipo de elemento (solo limite superior de proteccion)
         if accion == "GIRAR_LATA":
-            peso_valido = self._peso_min_lata < peso_actual <= self._peso_max_lata
-            rango_esperado = f"({self._peso_min_lata}g - {self._peso_max_lata}g]"
+            peso_valido = peso_actual <= self._peso_max_lata
+            limite_max = self._peso_max_lata
             direccion_ida = DIR_IZQUIERDA
         elif accion == "GIRAR_BOTELLA":
-            peso_valido = self._peso_min_botella < peso_actual <= self._peso_max_botella
-            rango_esperado = f"({self._peso_min_botella}g - {self._peso_max_botella}g]"
+            peso_valido = peso_actual <= self._peso_max_botella
+            limite_max = self._peso_max_botella
             direccion_ida = DIR_DERECHA
         else:
             self.get_logger().error(f"Accion desconocida: {accion}")
@@ -361,14 +355,14 @@ class NodoActuadores(Node):
         if not peso_valido:
             self.get_logger().error(
                 f"Envase rechazado por exceso de peso. Retire el envase. "
-                f"(Peso={peso_actual:.2f}g fuera del rango {rango_esperado})"
+                f"(Peso={peso_actual:.2f}g > Maximo={limite_max}g)"
             )
             self._pub_estado.publish(String(data="RECHAZADO_EXCESO_PESO"))
             self._frenar_motores()
             return
 
         self.get_logger().info(
-            f"Fase 0 superada con exito ({peso_actual:.2f}g en rango {rango_esperado}). Iniciando giro 360."
+            f"Fase 0 superada con exito (Peso={peso_actual:.2f}g <= Maximo={limite_max}g). Iniciando giro 360."
         )
 
         # ────────────────────────────────────────────────────────────────────
@@ -464,12 +458,16 @@ class NodoActuadores(Node):
 
             # Estado 0-0: Centro perfecto alcanzado
             if izq == 0 and der == 0:
-                self.get_logger().info(
-                    "Centro perfecto alcanzado (0-0). Aplicando compensacion de inercia y frenado."
-                )
                 self._aplicar_estado_motores(*ultima_direccion_movimiento)
                 time.sleep(pulso_inercia)
                 self._frenar_motores()
+                self.get_logger().info(
+                    "Centro perfecto alcanzado (0-0). Re-calibrando cero de la balanza..."
+                )
+                try:
+                    self.balanza.tare(5)
+                except Exception as exc:
+                    self.get_logger().warning(f"Error en auto-tara dinamica de balanza: {exc}")
                 return True
 
             elif izq == 0 and der == 1:
