@@ -35,6 +35,19 @@ LCD_BG       = "#001A00"
 LCD_FG       = "#00FF41"
 ANCHO_VISOR  = 400
 ALTO_VISOR   = 300
+COLOR_ERROR  = "#B91C1C"
+
+ESTILO_FRAME_NEUTRO = f"""
+QFrame#frame_principal {{
+    background-color: {WIN95_GRAY};
+}}
+"""
+
+ESTILO_FRAME_ERROR = f"""
+QFrame#frame_principal {{
+    background-color: {COLOR_ERROR};
+}}
+"""
 
 STYLESHEET = f"""
 QMainWindow, QWidget {{
@@ -181,7 +194,12 @@ class VentanaPrincipal(QMainWindow):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self._build_ui()
         self._ultimo_estado = "vacio"
-        self._bloqueo_error: bool = False
+        self.bloqueo_error: bool = False
+
+        self._timer_error = QTimer(self)
+        self._timer_error.setSingleShot(True)
+        self._timer_error.setInterval(4000)
+        self._timer_error.timeout.connect(self._reset_ui)
 
         self.senal_frame_raw.connect(self._actualizar_raw)
         self.senal_frame_seg.connect(self._actualizar_seg)
@@ -196,9 +214,11 @@ class VentanaPrincipal(QMainWindow):
         self.showFullScreen()
 
     def _build_ui(self) -> None:
-        root = QWidget()
-        self.setCentralWidget(root)
-        layout = QVBoxLayout(root)
+        self.frame_principal = QFrame()
+        self.frame_principal.setObjectName("frame_principal")
+        self.frame_principal.setStyleSheet(ESTILO_FRAME_NEUTRO)
+        self.setCentralWidget(self.frame_principal)
+        layout = QVBoxLayout(self.frame_principal)
         
         # Banner UX Superior
         self.lbl_banner = QLabel("Esperando elemento... Coloque el objeto en el sistema.")
@@ -237,6 +257,11 @@ class VentanaPrincipal(QMainWindow):
         self.lbl_veredicto_inferior.setWordWrap(True)
         layout.addWidget(self.lbl_veredicto_inferior)
 
+        # Alias semanticos: estos son los dos textos de estado que deben
+        # actualizarse siempre como una sola transaccion visual.
+        self.lbl_estado = self.lbl_banner
+        self.lbl_instruccion = self.lbl_veredicto_inferior
+
         self.btn_confirmar = QPushButton("CONFIRMAR Y GIRAR MOTOR")
         self.btn_confirmar.setObjectName("btn_confirmar")
         self._estilo_btn_inactivo = "background-color: #D3D3D3; color: #696969; font-size: 18pt; font-weight: bold; border-radius: 10px; padding: 15px;"
@@ -248,6 +273,8 @@ class VentanaPrincipal(QMainWindow):
         layout.addWidget(self.btn_confirmar)
 
     def _on_confirmar_clicked(self) -> None:
+        if self.bloqueo_error:
+            return
         self.btn_confirmar.setEnabled(False)
         self.btn_confirmar.setStyleSheet(self._estilo_btn_inactivo)
         self.btn_confirmar.setVisible(False)
@@ -267,9 +294,15 @@ class VentanaPrincipal(QMainWindow):
         """
         Restaura la interfaz visual al estado neutro de espera tras un rechazo o error.
         """
+        self._timer_error.stop()
         self._ultimo_estado = ""
         banner_bg = "#808080"
         inferior_color = "#808080"
+
+        # Eliminar por completo el CSS del estado anterior antes de aplicar el
+        # estilo neutro. Esto evita que reglas rojas/verdes queden acumuladas.
+        self.frame_principal.setStyleSheet("")
+        self.frame_principal.setStyleSheet(ESTILO_FRAME_NEUTRO)
 
         self.lbl_banner.setStyleSheet(
             f"font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: {banner_bg}; padding: 10px;"
@@ -281,11 +314,78 @@ class VentanaPrincipal(QMainWindow):
         self.lbl_veredicto_inferior.setText("Inserte una lata o botella en el centro.")
         self.btn_confirmar.setVisible(False)
         self.btn_confirmar.setEnabled(False)
-        self._bloqueo_error = False
+        self.btn_confirmar.setStyleSheet(self._estilo_btn_inactivo)
+        self.bloqueo_error = False
+
+    @staticmethod
+    def _es_estado_error(estado: str) -> bool:
+        """Reconoce rechazos estructurados y errores directos de cualquier nodo."""
+        texto = estado.casefold().replace("-", "_")
+        marcadores_error = (
+            "rechaz",
+            "error",
+            "exceso_peso",
+            "exceso de peso",
+            "fallo",
+            "timeout",
+        )
+        return any(marcador in texto for marcador in marcadores_error)
+
+    def _mostrar_error(self, estado: str) -> None:
+        """Muestra un estado rojo atomico y bloquea mensajes durante 4 segundos."""
+        texto = estado.casefold()
+        self.bloqueo_error = True
+        self._ultimo_estado = estado
+
+        # Reset absoluto: se descarta cualquier hoja de estilo previa antes de
+        # pintar el frame y ambos textos con el color de error.
+        self.frame_principal.setStyleSheet("")
+        self.frame_principal.setStyleSheet(ESTILO_FRAME_ERROR)
+        estilo_estado_error = (
+            f"font-size: 24px; font-weight: bold; color: #FFFFFF; "
+            f"background-color: {COLOR_ERROR}; padding: 10px;"
+        )
+        estilo_instruccion_error = (
+            "font-size: 20pt; font-weight: bold; color: #FFFFFF; "
+            f"background-color: {COLOR_ERROR}; padding: 8px;"
+        )
+        self.lbl_estado.setStyleSheet(estilo_estado_error)
+        self.lbl_instruccion.setStyleSheet(estilo_instruccion_error)
+
+        if "balanza" in texto:
+            self.lbl_estado.setText("ERROR DE BALANZA")
+            self.lbl_instruccion.setText(
+                "No fue posible validar el peso. Retire el envase y avise a un encargado."
+            )
+        elif "actuador" in texto or "mecanismo" in texto or "timeout" in texto:
+            self.lbl_estado.setText("ERROR DE MECANISMO")
+            self.lbl_instruccion.setText(
+                "El mecanismo no pudo completar el ciclo. Retire el envase y espere."
+            )
+        else:
+            self.lbl_estado.setText("ENVASE RECHAZADO")
+            self.lbl_instruccion.setText(
+                "Exceso de peso o suciedad detectada.\nPor favor, retire el envase."
+            )
+
+        self.btn_confirmar.setVisible(False)
+        self.btn_confirmar.setEnabled(False)
+        self.btn_confirmar.setStyleSheet(self._estilo_btn_inactivo)
+        self._timer_error.start()
 
     def _actualizar_estado(self, estado: str) -> None:
+        # Durante la pantalla roja se descartan incluso mensajes validos de la
+        # camara. Asi ningun estado tardio puede repintar la interfaz en verde.
+        if self.bloqueo_error:
+            return
+
         if self._ultimo_estado == estado:
             return
+
+        if self._es_estado_error(estado):
+            self._mostrar_error(estado)
+            return
+
         self._ultimo_estado = estado
         
         self.btn_confirmar.setEnabled(False)
@@ -295,19 +395,7 @@ class VentanaPrincipal(QMainWindow):
         texto = estado.lower()
 
         # Parseo de mensajes estructurados o directos de backend
-        if "rechaz" in texto or "exceso_peso" in texto:
-            banner_txt = "ENVASE RECHAZADO"
-            veredicto_txt = "Exceso de peso detectado.\nPor favor, retire el envase de la maquina."
-            boton_txt = "NONE"
-        elif "error_balanza" in texto:
-            banner_txt = "ERROR DE BALANZA"
-            veredicto_txt = "Fallo de comunicacion con el sensor de peso."
-            boton_txt = "NONE"
-        elif "error_ciclo_actuadores" in texto:
-            banner_txt = "ERROR DE MECANISMO"
-            veredicto_txt = "Timeout o fallo en ciclo de actuadores."
-            boton_txt = "NONE"
-        elif "reciclaje_exitoso" in texto:
+        if "reciclaje_exitoso" in texto:
             banner_txt = "RECICLAJE COMPLETADO"
             veredicto_txt = "Envase procesado correctamente."
             boton_txt = "NONE"

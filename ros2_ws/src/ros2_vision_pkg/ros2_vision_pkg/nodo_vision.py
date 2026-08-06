@@ -168,8 +168,11 @@ class NodoVision(Node):
         self.sub_confirmacion = self.create_subscription(Empty, '/ui/confirmacion', self._cb_confirmacion, 10)
         self._confirmacion_recibida = False
 
+        # La confirmacion visual depende de una lectura real de la balanza. Un
+        # valor inicial de 0.0 permitiria aceptar un envase antes de recibir el
+        # primer mensaje de /peso_elemento.
+        self._ultimo_peso = None
         self.sub_peso = self.create_subscription(Float32, '/peso_elemento', self._cb_peso, 10)
-        self._ultimo_peso: float = 0.0
 
         self.get_logger().info("Nodo_vision iniciado (FSM + SPoP). Esperando imagenes...")
 
@@ -359,7 +362,7 @@ class NodoVision(Node):
         scale = min(self.input_size / img_w, self.input_size / img_h)
         
         with self._inference_lock:
-            if self._estado_actual in ['BUSQUEDA', 'ESPERA_RETIRO'] and self._frame_for_inference is None:
+            if self._estado_actual in ['BUSQUEDA', 'ESPERA_RETIRO', 'RECHAZO_PESO'] and self._frame_for_inference is None:
                 self._frame_for_inference = img.copy()
             best_obj = self._latest_inference["best_obj"]
             best_score = self._latest_inference["best_score"]
@@ -415,19 +418,32 @@ class NodoVision(Node):
 
                 if self._id_congelado == "can":
                     clase_str = "LATA"
-                    max_peso = 40.0
+                    max_peso = 30.0
                     angulo = -90.0
                 else:
                     clase_str = "BOTELLA"
-                    max_peso = 80.0
+                    max_peso = 65.0
                     angulo = 90.0
 
                 peso_actual = self._ultimo_peso
 
-                if peso_actual > max_peso:
+                # Fail-safe: sin una lectura valida nunca se publica un estado
+                # de aceptacion ni se habilita la confirmacion en la GUI.
+                if peso_actual is None or not math.isfinite(peso_actual):
+                    self._frames_analizando = 14
+                    self._ultimo_veredicto = (
+                        "PROCESAMIENTO EN CURSO|Esperando una lectura valida "
+                        "de la balanza...|NONE"
+                    )
+                    out_estado = self._ultimo_veredicto
+                elif peso_actual > max_peso:
                     self._estado_actual = 'RECHAZO_PESO'
                     self._confirmacion_recibida = False
-                    self._ultimo_veredicto = f"ENVASE RECHAZADO|Exceso de peso detectado ({peso_actual:.1f}g > {max_peso:.0f}g).\nPor favor, retire el envase.|NONE"
+                    self._ultimo_veredicto = (
+                        f"RECHAZO_POR_PESO|ENVASE RECHAZADO: {clase_str} con "
+                        f"exceso de peso ({peso_actual:.1f}g > {max_peso:.0f}g).\n"
+                        "Por favor, retire el envase.|NONE"
+                    )
                     
                     self._frozen_seg_img = np.zeros((480, 640, 3), dtype=np.uint8)
                     self._frozen_seg_img[:] = (0, 0, 180)
