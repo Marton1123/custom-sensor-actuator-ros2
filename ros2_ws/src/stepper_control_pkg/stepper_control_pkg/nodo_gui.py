@@ -201,6 +201,11 @@ class VentanaPrincipal(QMainWindow):
         self._timer_error.setInterval(4000)
         self._timer_error.timeout.connect(self._reset_ui)
 
+        self._timer_exito = QTimer(self)
+        self._timer_exito.setSingleShot(True)
+        self._timer_exito.setInterval(2000)
+        self._timer_exito.timeout.connect(self._reset_ui)
+
         self.senal_frame_raw.connect(self._actualizar_raw)
         self.senal_frame_seg.connect(self._actualizar_seg)
         self.senal_estado.connect(self._actualizar_estado)
@@ -292,9 +297,10 @@ class VentanaPrincipal(QMainWindow):
 
     def _reset_ui(self) -> None:
         """
-        Restaura la interfaz visual al estado neutro de espera tras un rechazo o error.
+        Restaura la interfaz visual al estado neutro tras un rechazo, error o exito.
         """
         self._timer_error.stop()
+        self._timer_exito.stop()
         self._ultimo_estado = ""
         banner_bg = "#808080"
         inferior_color = "#808080"
@@ -334,6 +340,7 @@ class VentanaPrincipal(QMainWindow):
     def _mostrar_error(self, estado: str) -> None:
         """Muestra un estado rojo atomico y bloquea mensajes durante 4 segundos."""
         texto = estado.casefold()
+        self._timer_exito.stop()
         self.bloqueo_error = True
         self._ultimo_estado = estado
 
@@ -381,6 +388,10 @@ class VentanaPrincipal(QMainWindow):
 
         if self._ultimo_estado == estado:
             return
+
+        es_exito = "reciclaje_exitoso" in estado.casefold()
+        if self._timer_exito.isActive() and not es_exito:
+            self._timer_exito.stop()
 
         if self._es_estado_error(estado):
             self._mostrar_error(estado)
@@ -445,6 +456,11 @@ class VentanaPrincipal(QMainWindow):
         else:
             self.btn_confirmar.setVisible(False)
             self.btn_confirmar.setEnabled(False)
+
+        if es_exito:
+            # Actuadores publica el exito despues de que vision ya regreso a
+            # BUSQUEDA. Sin este timer, ese mensaje tardio queda fijo para siempre.
+            self._timer_exito.start()
 
     def keyPressEvent(self, event) -> None:
         super().keyPressEvent(event)

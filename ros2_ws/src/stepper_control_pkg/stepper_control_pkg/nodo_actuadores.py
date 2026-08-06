@@ -37,8 +37,9 @@ from std_msgs.msg import Float32, String
 DEFAULT_HX711_SCALE: float = 2039.0          # Factor ADC -> gramos
 
 # Umbrales maximos de peso de seguridad (Gramos)
-DEFAULT_PESO_MAX_LATA: float = 40.0
-DEFAULT_PESO_MAX_BOTELLA: float = 80.0
+DEFAULT_PESO_MAX_LATA: float = 30.0
+DEFAULT_PESO_MAX_BOTELLA: float = 65.0
+MAX_PESO_TARA_AUTOMATICA: float = 5.0
 
 # Parametros de dinamica de actuadores y ciclo de reciclaje
 DEFAULT_PULSO_INERCIA: float = 0.005         # Pulso de gracia / inercia (5 ms)
@@ -253,8 +254,11 @@ class NodoActuadores(Node):
             msg = Float32()
             msg.data = float(peso)
             self._pub_peso.publish(msg)
-        except Exception:
-            pass
+        except Exception as exc:
+            self.get_logger().warning(
+                f"No se pudo publicar el peso periodico del HX711: {exc}",
+                throttle_duration_sec=2.0,
+            )
 
     def _init_gpio(self) -> int:
         """
@@ -479,11 +483,18 @@ class NodoActuadores(Node):
                 self._aplicar_estado_motores(*ultima_direccion_movimiento)
                 time.sleep(pulso_inercia)
                 self._frenar_motores()
-                self.get_logger().info(
-                    "Centro perfecto alcanzado (0-0). Re-calibrando cero de la balanza..."
-                )
+                self.get_logger().info("Centro perfecto alcanzado (0-0).")
                 try:
-                    self.balanza.tare(5)
+                    peso_residual = self.balanza.get_units(3)
+                    if abs(peso_residual) <= MAX_PESO_TARA_AUTOMATICA:
+                        self.get_logger().info(
+                            f"Pala vacia ({peso_residual:.2f}g). Re-calibrando cero de la balanza..."
+                        )
+                        self.balanza.tare(5)
+                    else:
+                        self.get_logger().warning(
+                            f"Auto-tara omitida: quedan {peso_residual:.2f}g sobre la pala."
+                        )
                 except Exception as exc:
                     self.get_logger().warning(f"Error en auto-tara dinamica de balanza: {exc}")
                 return True

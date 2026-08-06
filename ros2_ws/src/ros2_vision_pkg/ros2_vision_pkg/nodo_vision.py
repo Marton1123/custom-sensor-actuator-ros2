@@ -81,6 +81,7 @@ class NodoVision(Node):
         self.declare_parameter('input_size', 640)
         self.declare_parameter('k_area', 0.05)
         self.declare_parameter('num_threads', 4)
+        self.declare_parameter('peso_timeout_sec', 1.0)
 
         # Leer parámetros
         self.modelo_dir = self.get_parameter('modelo_dir').get_parameter_value().string_value
@@ -89,6 +90,7 @@ class NodoVision(Node):
         self.input_size = self.get_parameter('input_size').get_parameter_value().integer_value
         self.k_area = self.get_parameter('k_area').get_parameter_value().double_value
         self.num_threads = self.get_parameter('num_threads').get_parameter_value().integer_value
+        self.peso_timeout_sec = self.get_parameter('peso_timeout_sec').get_parameter_value().double_value
 
         self.get_logger().info(f"Cargando modelo NCNN desde: {self.modelo_dir}")
         
@@ -172,6 +174,8 @@ class NodoVision(Node):
         # valor inicial de 0.0 permitiria aceptar un envase antes de recibir el
         # primer mensaje de /peso_elemento.
         self._ultimo_peso = None
+        self._ultimo_peso_recibido_en = None
+        self._inicio_analisis_peso = None
         self.sub_peso = self.create_subscription(Float32, '/peso_elemento', self._cb_peso, 10)
 
         self.get_logger().info("Nodo_vision iniciado (FSM + SPoP). Esperando imagenes...")
@@ -181,6 +185,7 @@ class NodoVision(Node):
 
     def _cb_peso(self, msg: Float32):
         self._ultimo_peso = float(msg.data)
+        self._ultimo_peso_recibido_en = time.monotonic()
 
 
 
@@ -398,6 +403,7 @@ class NodoVision(Node):
                 self._box_congelado = best_box
                 self._estado_actual = 'ANALIZANDO'
                 self._frames_analizando = 0
+                self._inicio_analisis_peso = time.monotonic()
                 self._ultimo_veredicto = "PROCESAMIENTO EN CURSO|Estabilizando...\nPor favor, retire la mano.|NONE"
                 out_estado = self._ultimo_veredicto
 
@@ -426,14 +432,25 @@ class NodoVision(Node):
                     angulo = 90.0
 
                 peso_actual = self._ultimo_peso
+                peso_recibido_en = self._ultimo_peso_recibido_en
+                peso_fresco = (
+                    peso_recibido_en is not None
+                    and self._inicio_analisis_peso is not None
+                    and peso_recibido_en >= self._inicio_analisis_peso
+                    and time.monotonic() - peso_recibido_en <= self.peso_timeout_sec
+                )
 
                 # Fail-safe: sin una lectura valida nunca se publica un estado
                 # de aceptacion ni se habilita la confirmacion en la GUI.
-                if peso_actual is None or not math.isfinite(peso_actual):
+                if peso_actual is None or not math.isfinite(peso_actual) or not peso_fresco:
                     self._frames_analizando = 14
                     self._ultimo_veredicto = (
                         "PROCESAMIENTO EN CURSO|Esperando una lectura valida "
                         "de la balanza...|NONE"
+                    )
+                    self.get_logger().warning(
+                        "Sin una muestra de peso nueva y valida durante el analisis.",
+                        throttle_duration_sec=2.0,
                     )
                     out_estado = self._ultimo_veredicto
                 elif peso_actual > max_peso:
@@ -536,6 +553,11 @@ class NodoVision(Node):
             self._estado_actual = 'BUSQUEDA'
             self._frames_botella = 0
             self._last_best_obj = None
+            # Nunca reutilizar el peso del envase anterior. La siguiente
+            # clasificacion debera recibir una muestra posterior al analisis.
+            self._ultimo_peso = None
+            self._ultimo_peso_recibido_en = None
+            self._inicio_analisis_peso = None
             out_estado = "SISTEMA DISPONIBLE|Esperando envase...\nInserte una lata o botella en el centro.|NONE"
             msg_grados = Float32()
             msg_grados.data = 0.0
