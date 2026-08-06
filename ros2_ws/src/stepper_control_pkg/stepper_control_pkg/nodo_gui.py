@@ -18,7 +18,7 @@ from std_msgs.msg import Float32, String, Bool, Empty
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
@@ -262,6 +262,25 @@ class VentanaPrincipal(QMainWindow):
             ANCHO_VISOR, ALTO_VISOR, Qt.AspectRatioMode.KeepAspectRatio
         ))
 
+    def _reset_ui(self) -> None:
+        """
+        Restaura la interfaz visual al estado neutro de espera tras un rechazo o error.
+        """
+        self._ultimo_estado = ""
+        banner_bg = "#808080"
+        inferior_color = "#808080"
+
+        self.lbl_banner.setStyleSheet(
+            f"font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: {banner_bg}; padding: 10px;"
+        )
+        self.lbl_veredicto_inferior.setStyleSheet(
+            f"font-size: 20pt; font-weight: bold; color: {inferior_color};"
+        )
+        self.lbl_banner.setText("Esperando envase... Coloque el objeto en el sistema.")
+        self.lbl_veredicto_inferior.setText("Inserte una lata o botella en el centro.")
+        self.btn_confirmar.setVisible(False)
+        self.btn_confirmar.setEnabled(False)
+
     def _actualizar_estado(self, estado: str) -> None:
         if self._ultimo_estado == estado:
             return
@@ -271,28 +290,45 @@ class VentanaPrincipal(QMainWindow):
         self.btn_confirmar.setStyleSheet(self._estilo_btn_inactivo)
         self.btn_confirmar.setVisible(False)
         
-        estado_upper = estado.upper()
+        texto = estado.lower()
 
-        if "RECHAZAD" in estado_upper and "PESO" in estado_upper:
+        # ── Intercepcion prioritaria y blindada para rechazos (peso, suciedad, rechazo generico) ──
+        if "rechaz" in texto or "peso" in texto or "suci" in texto:
             banner_txt = "ENVASE RECHAZADO"
-            veredicto_txt = "Por favor, vacie el liquido o retire la basura del interior."
-            boton_txt = "NONE"
-        elif "RECHAZAD" in estado_upper or "SUCIA" in estado_upper:
-            banner_txt = "ENVASE RECHAZADO"
-            veredicto_txt = "El objeto no cumple con los criterios de reciclaje."
-            boton_txt = "NONE"
-        elif "ERROR_BALANZA" in estado_upper:
+            veredicto_txt = "Por favor, vacie el liquido\no retire la basura del interior."
+            banner_bg = "#B91C1C"
+            inferior_color = "#B91C1C"
+
+            self.lbl_banner.setStyleSheet(
+                f"font-size: 24px; font-weight: bold; color: #FFFFFF; background-color: {banner_bg}; padding: 10px;"
+            )
+            self.lbl_veredicto_inferior.setStyleSheet(
+                f"font-size: 20pt; font-weight: bold; color: {inferior_color};"
+            )
+            self.lbl_banner.setText(banner_txt)
+            self.lbl_veredicto_inferior.setText(veredicto_txt)
+            self.btn_confirmar.setVisible(False)
+            self.btn_confirmar.setEnabled(False)
+
+            # Iniciar temporizador de reseteo automatico (4 segundos)
+            QTimer.singleShot(4000, self._reset_ui)
+            return
+
+        elif "error_balanza" in texto:
             banner_txt = "ERROR DE BALANZA"
             veredicto_txt = "Fallo de comunicacion con el sensor de peso."
             boton_txt = "NONE"
-        elif "RECICLAJE_EXITOSO" in estado_upper:
+            QTimer.singleShot(4000, self._reset_ui)
+        elif "reciclaje_exitoso" in texto:
             banner_txt = "RECICLAJE COMPLETADO"
             veredicto_txt = "Envase procesado correctamente."
             boton_txt = "NONE"
-        elif "ERROR_CICLO_ACTUADORES" in estado_upper:
+            QTimer.singleShot(3000, self._reset_ui)
+        elif "error_ciclo_actuadores" in texto:
             banner_txt = "ERROR DE MECANISMO"
             veredicto_txt = "Timeout o fallo en ciclo de actuadores."
             boton_txt = "NONE"
+            QTimer.singleShot(4000, self._reset_ui)
         elif estado.count("|") >= 2:
             partes = estado.split("|", 2)
             banner_txt = partes[0]
@@ -306,19 +342,13 @@ class VentanaPrincipal(QMainWindow):
             veredicto_txt = estado
             boton_txt = "NONE"
 
-        # Determinacion de colores
+        # Determinacion de colores para estados no rechazados
+        estado_upper = estado.upper()
         banner_upper = banner_txt.upper()
         veredicto_upper = veredicto_txt.upper()
 
-        if (
-            "RECHAZAD" in estado_upper
-            or "RECHAZAD" in banner_upper
-            or "RECHAZAD" in veredicto_upper
-            or "SUCIA" in veredicto_upper
-            or "ERROR" in estado_upper
-            or "ERROR" in banner_upper
-        ):
-            banner_bg = "#B91C1C"       # Rojo de rechazo / error
+        if "ERROR" in estado_upper or "ERROR" in banner_upper:
+            banner_bg = "#B91C1C"       # Rojo de error
             inferior_color = "#B91C1C"
         elif "DISPONIBLE" in banner_upper or "ESPERANDO" in banner_upper:
             banner_bg = "#808080"       # Gris de reposo
