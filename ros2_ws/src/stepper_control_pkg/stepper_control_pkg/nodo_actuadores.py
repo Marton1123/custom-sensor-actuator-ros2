@@ -15,6 +15,7 @@ Arquitectura DevSecOps:
 import time
 import threading
 import math
+from collections import deque
 from typing import Optional, Tuple
 
 try:
@@ -28,7 +29,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Bool, Float32, String
 
 
 # ============================================================================
@@ -41,6 +42,12 @@ DEFAULT_HX711_SCALE: float = 2039.0          # Factor ADC -> gramos
 DEFAULT_PESO_MAX_LATA: float = 30.0
 DEFAULT_PESO_MAX_BOTELLA: float = 65.0
 MAX_PESO_TARA_AUTOMATICA: float = 5.0
+# Cubre el desplazamiento negativo observado al volver el brazo al centro
+# (-349.79 g), sin aceptar lecturas extremas propias de una falla del HX711.
+MIN_PESO_TARA_AUTOMATICA: float = -500.0
+TOLERANCIA_CERO_BALANZA: float = 2.0
+VARIACION_MAX_TARA: float = 3.0
+MUESTRAS_TARA_ESTABLE: int = 5
 
 # Parametros de dinamica de actuadores y ciclo de reciclaje
 DEFAULT_PULSO_INERCIA: float = 0.005         # Pulso de gracia / inercia (5 ms)
@@ -137,6 +144,7 @@ class NodoActuadores(Node):
     TOPIC_OBJETO_DETECTADO = "/objeto_detectado"
     TOPIC_PESO_ELEMENTO = "/peso_elemento"
     TOPIC_ESTADO_RECICLAJE = "/clasificacion_objeto"
+    TOPIC_PALA_VACIA_VISUAL = "/pala_vacia_visual"
 
     def __init__(self) -> None:
         super().__init__("nodo_actuadores")
@@ -181,6 +189,9 @@ class NodoActuadores(Node):
         self._hilo_ciclo: Optional[threading.Thread] = None
         self._cancelar = threading.Event()
         self._lock = threading.Lock()
+        self._balanza_lock = threading.Lock()
+        self._pala_vacia_visual = False
+        self._historial_peso_vacio = deque(maxlen=MUESTRAS_TARA_ESTABLE)
 
         # ── Inicializacion de Hardware GPIO y Balanza HX711 ────────────────
         self._h = self._init_gpio()
@@ -189,7 +200,8 @@ class NodoActuadores(Node):
 
         self.get_logger().info("Ejecutando tara inicial de balanza HX711 (peso de brazo = 0g)...")
         try:
-            self.balanza.tare(15)
+            with self._balanza_lock:
+                self.balanza.tare(15)
             self.get_logger().info(
                 f"Tara completada. Offset={self.balanza.offset:.1f}, Escala={self.balanza.scale:.1f}"
             )
@@ -214,6 +226,13 @@ class NodoActuadores(Node):
             String,
             self.TOPIC_OBJETO_DETECTADO,
             self._cb_objeto_detectado,
+            qos,
+        )
+
+        self._sub_pala_vacia = self.create_subscription(
+            Bool,
+            self.TOPIC_PALA_VACIA_VISUAL,
+            self._cb_pala_vacia_visual,
             qos,
         )
 
@@ -249,9 +268,12 @@ class NodoActuadores(Node):
         """
         with self._lock:
             if self._hilo_ciclo is not None and self._hilo_ciclo.is_alive():
+                self._historial_peso_vacio.clear()
                 return
         try:
-            peso = self.balanza.get_units(3)
+            with self._balanza_lock:
+                peso = self.balanza.get_units(3)
+                peso = self._intentar_autotara_en_reposo(peso)
             msg = Float32()
             msg.data = float(peso)
             self._pub_peso.publish(msg)
@@ -260,6 +282,53 @@ class NodoActuadores(Node):
                 f"No se pudo publicar el peso periodico del HX711: {exc}",
                 throttle_duration_sec=2.0,
             )
+
+    def _intentar_autotara_en_reposo(self, peso: float) -> float:
+        """
+        Corrige un desplazamiento recuperable del cero sólo cuando visión
+        confirma que la pala está vacía y varias lecturas son estables.
+
+        Debe llamarse con el bloqueo de balanza adquirido.
+        """
+        if not self._pala_vacia_visual or not math.isfinite(peso):
+            self._historial_peso_vacio.clear()
+            return peso
+
+        self._historial_peso_vacio.append(float(peso))
+        if len(self._historial_peso_vacio) < MUESTRAS_TARA_ESTABLE:
+            return peso
+
+        muestras = tuple(self._historial_peso_vacio)
+        promedio = sum(muestras) / len(muestras)
+        variacion = max(muestras) - min(muestras)
+
+        if variacion > VARIACION_MAX_TARA:
+            return peso
+
+        if abs(promedio) <= TOLERANCIA_CERO_BALANZA:
+            return peso
+
+        # Un peso positivo importante puede ser un objeto fuera del campo de
+        # cámara. Una deriva negativa moderada, en cambio, no puede representar
+        # una carga física y es recuperable con la pala visualmente vacía.
+        if not MIN_PESO_TARA_AUTOMATICA <= promedio <= MAX_PESO_TARA_AUTOMATICA:
+            self.get_logger().warning(
+                f"Auto-tara bloqueada: lectura vacía estable de {promedio:.2f}g "
+                f"(variación {variacion:.2f}g).",
+                throttle_duration_sec=3.0,
+            )
+            return peso
+
+        offset_anterior = self.balanza.offset
+        self.balanza.tare(10)
+        peso_corregido = self.balanza.get_units(3)
+        self._historial_peso_vacio.clear()
+        self.get_logger().info(
+            f"Auto-tara segura completada: promedio previo={promedio:.2f}g, "
+            f"offset {offset_anterior:.1f} -> {self.balanza.offset:.1f}, "
+            f"peso final={peso_corregido:.2f}g."
+        )
+        return peso_corregido
 
     def _init_gpio(self) -> int:
         """
@@ -320,6 +389,11 @@ class NodoActuadores(Node):
             self.get_logger().info("Deteccion vision: LATA -> Iniciando ciclo.")
             self._lanzar_ciclo_reciclaje("GIRAR_LATA")
 
+    def _cb_pala_vacia_visual(self, msg: Bool) -> None:
+        self._pala_vacia_visual = bool(msg.data)
+        if not self._pala_vacia_visual:
+            self._historial_peso_vacio.clear()
+
     def _lanzar_ciclo_reciclaje(self, accion: str) -> None:
         """
         Cancela cualquier movimiento previo y ejecuta el ciclo de lazo cerrado en un worker thread.
@@ -353,7 +427,8 @@ class NodoActuadores(Node):
         # ────────────────────────────────────────────────────────────────────
         self.get_logger().info("Fase 0: Validando peso del envase con celda de carga HX711...")
         try:
-            peso_actual = self.balanza.get_units(5)
+            with self._balanza_lock:
+                peso_actual = self.balanza.get_units(5)
             self.get_logger().info(f"Lectura de peso actual: {peso_actual:.2f} g")
             self._pub_peso.publish(Float32(data=float(peso_actual)))
         except Exception as exc:
@@ -362,20 +437,30 @@ class NodoActuadores(Node):
             self._frenar_motores()
             return
 
-        # Validacion de rangos especificos segun tipo de elemento (solo limite superior de proteccion)
+        # Validacion de rangos especificos segun tipo de elemento.
         if accion == "GIRAR_LATA":
-            peso_valido = math.isfinite(peso_actual) and 0.0 <= peso_actual <= self._peso_max_lata
             limite_max = self._peso_max_lata
             direccion_ida = DIR_IZQUIERDA
         elif accion == "GIRAR_BOTELLA":
-            peso_valido = math.isfinite(peso_actual) and 0.0 <= peso_actual <= self._peso_max_botella
             limite_max = self._peso_max_botella
             direccion_ida = DIR_DERECHA
         else:
             self.get_logger().error(f"Accion desconocida: {accion}")
             return
 
-        if not peso_valido:
+        if (
+            not math.isfinite(peso_actual)
+            or peso_actual < -TOLERANCIA_CERO_BALANZA
+        ):
+            self.get_logger().error(
+                f"Lectura de balanza invalida: {peso_actual:.2f}g. "
+                "Se requiere recuperar el cero antes de mover motores."
+            )
+            self._pub_estado.publish(String(data="ERROR_BALANZA"))
+            self._frenar_motores()
+            return
+
+        if peso_actual > limite_max:
             self.get_logger().error(
                 f"Envase rechazado por exceso de peso. Retire el envase. "
                 f"(Peso={peso_actual:.2f}g > Maximo={limite_max}g)"
@@ -484,20 +569,10 @@ class NodoActuadores(Node):
                 self._aplicar_estado_motores(*ultima_direccion_movimiento)
                 time.sleep(pulso_inercia)
                 self._frenar_motores()
-                self.get_logger().info("Centro perfecto alcanzado (0-0).")
-                try:
-                    peso_residual = self.balanza.get_units(3)
-                    if abs(peso_residual) <= MAX_PESO_TARA_AUTOMATICA:
-                        self.get_logger().info(
-                            f"Pala vacia ({peso_residual:.2f}g). Re-calibrando cero de la balanza..."
-                        )
-                        self.balanza.tare(5)
-                    else:
-                        self.get_logger().warning(
-                            f"Auto-tara omitida: quedan {peso_residual:.2f}g sobre la pala."
-                        )
-                except Exception as exc:
-                    self.get_logger().warning(f"Error en auto-tara dinamica de balanza: {exc}")
+                self.get_logger().info(
+                    "Centro perfecto alcanzado (0-0). "
+                    "La auto-tara se evaluará en reposo con confirmación visual."
+                )
                 return True
 
             elif izq == 0 and der == 1:

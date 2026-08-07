@@ -22,6 +22,8 @@ from cv_bridge import CvBridge
 
 import ncnn
 
+TOLERANCIA_CERO_BALANZA = 2.0
+
 def softmax(x, axis=-1):
     x_max = np.max(x, axis=axis, keepdims=True)
     e_x = np.exp(x - x_max)
@@ -166,6 +168,8 @@ class NodoVision(Node):
         self.pub_clasificacion = self.create_publisher(String, '/clasificacion_objeto', 10)
         self.pub_tamano = self.create_publisher(Float32, '/tamano_estimado', 10)
         self.pub_comando_grados = self.create_publisher(Float32, '/comando_grados', 10)
+        self.pub_pala_vacia = self.create_publisher(Bool, '/pala_vacia_visual', 10)
+        self._ultimo_estado_pala_vacia = None
 
         self.sub_confirmacion = self.create_subscription(Empty, '/ui/confirmacion', self._cb_confirmacion, 10)
         self._confirmacion_recibida = False
@@ -186,6 +190,12 @@ class NodoVision(Node):
     def _cb_peso(self, msg: Float32):
         self._ultimo_peso = float(msg.data)
         self._ultimo_peso_recibido_en = time.monotonic()
+
+    def _publicar_pala_vacia_visual(self, vacia: bool) -> None:
+        if self._ultimo_estado_pala_vacia == vacia:
+            return
+        self.pub_pala_vacia.publish(Bool(data=vacia))
+        self._ultimo_estado_pala_vacia = vacia
 
 
 
@@ -363,6 +373,7 @@ class NodoVision(Node):
         out_seg = self._canvas_espera.copy()
         out_estado = self._ultimo_veredicto
         out_area = 0.0
+        pala_vacia_visual = False
 
         scale = min(self.input_size / img_w, self.input_size / img_h)
         
@@ -391,6 +402,8 @@ class NodoVision(Node):
             else:
                 self._frames_botella = 0
                 self._last_best_obj = None
+
+            pala_vacia_visual = best_obj not in ["bottle", "can"]
             
             if best_obj in ["bottle", "can"]:
                 bx1, by1, bx2, by2 = map(int, best_box)
@@ -453,24 +466,35 @@ class NodoVision(Node):
                         throttle_duration_sec=2.0,
                     )
                     out_estado = self._ultimo_veredicto
-                elif abs(peso_actual) > max_peso:
+                elif peso_actual < -TOLERANCIA_CERO_BALANZA or peso_actual > max_peso:
                     self._estado_actual = 'RECHAZO_PESO'
                     self._confirmacion_recibida = False
-                    self._ultimo_veredicto = (
-                        f"RECHAZO_POR_PESO|ENVASE RECHAZADO: {clase_str} con "
-                        f"exceso de peso ({peso_actual:.1f}g > {max_peso:.0f}g).\n"
-                        "Por favor, retire el envase.|NONE"
-                    )
+
+                    lectura_negativa = peso_actual < -TOLERANCIA_CERO_BALANZA
+                    if lectura_negativa:
+                        self._ultimo_veredicto = (
+                            f"ERROR_BALANZA|Lectura negativa fuera de rango "
+                            f"({peso_actual:.1f}g). Retire el envase para "
+                            "recuperar el cero.|NONE"
+                        )
+                        text1 = "ERROR DE BALANZA"
+                        text2 = f"LECTURA INVALIDA: {peso_actual:.1f}g"
+                    else:
+                        self._ultimo_veredicto = (
+                            f"RECHAZO_POR_PESO|ENVASE RECHAZADO: {clase_str} con "
+                            f"exceso de peso ({peso_actual:.1f}g > {max_peso:.0f}g).\n"
+                            "Por favor, retire el envase.|NONE"
+                        )
+                        text1 = f"{clase_str} RECHAZADA"
+                        text2 = f"EXCESO DE PESO: {peso_actual:.1f}g"
                     
                     self._frozen_seg_img = np.zeros((480, 640, 3), dtype=np.uint8)
                     self._frozen_seg_img[:] = (0, 0, 180)
-                    text1 = f"{clase_str} RECHAZADA"
                     ts1 = cv2.getTextSize(text1, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)[0]
                     tx1 = (640 - ts1[0]) // 2
                     ty1 = (480 + ts1[1]) // 2 - 25
                     cv2.putText(self._frozen_seg_img, text1, (tx1, ty1), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
                     
-                    text2 = f"EXCESO DE PESO: {peso_actual:.1f}g"
                     ts2 = cv2.getTextSize(text2, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
                     tx2 = (640 - ts2[0]) // 2
                     cv2.putText(self._frozen_seg_img, text2, (tx2, ty1 + 45), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
@@ -505,11 +529,13 @@ class NodoVision(Node):
             else:
                 self._frames_vacio += 1
 
+            pala_vacia_visual = self._frames_vacio >= 15
+
             limite_rechazo = 30.0 if self._id_congelado == "can" else 65.0
             peso_seguro = (
                 self._ultimo_peso is not None
                 and math.isfinite(self._ultimo_peso)
-                and abs(self._ultimo_peso) <= limite_rechazo
+                and -TOLERANCIA_CERO_BALANZA <= self._ultimo_peso <= limite_rechazo
             )
 
             if self._frames_vacio >= 15 and peso_seguro:
@@ -542,6 +568,8 @@ class NodoVision(Node):
                 self._frames_vacio = 0
             else:
                 self._frames_vacio += 1
+
+            pala_vacia_visual = self._frames_vacio >= 10
             
             bx1, by1, bx2, by2 = map(int, self._box_congelado)
             cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (255, 0, 0), 2)
@@ -555,8 +583,10 @@ class NodoVision(Node):
         elif self._estado_actual == 'ESPERA_RETORNO':
             # Se salta automáticamente por compatibilidad gráfica
             self._estado_actual = 'RESETEO'
+            pala_vacia_visual = True
 
         elif self._estado_actual == 'RESETEO':
+            pala_vacia_visual = True
             self._estado_actual = 'BUSQUEDA'
             self._frames_botella = 0
             self._last_best_obj = None
@@ -573,6 +603,8 @@ class NodoVision(Node):
         # ----------------------------------------------------
         # SPoP - Single Point of Publication
         # ----------------------------------------------------
+        self._publicar_pala_vacia_visual(pala_vacia_visual)
+
         out_raw_rgb = cv2.cvtColor(out_raw, cv2.COLOR_BGR2RGB)
         out_seg_rgb = cv2.cvtColor(out_seg, cv2.COLOR_BGR2RGB)
 

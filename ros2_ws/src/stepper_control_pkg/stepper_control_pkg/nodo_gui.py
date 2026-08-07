@@ -327,6 +327,7 @@ class VentanaPrincipal(QMainWindow):
             or "rechazado_exceso_peso" in texto
             or "exceso de peso" in texto
             or "exceso_peso" in texto
+            or "error_balanza" in texto
         )
 
     @staticmethod
@@ -378,7 +379,7 @@ class VentanaPrincipal(QMainWindow):
         if "balanza" in texto:
             self.lbl_estado.setText("ERROR DE BALANZA")
             self.lbl_instruccion.setText(
-                "No fue posible validar el peso. Retire el envase y avise a un encargado."
+                "No fue posible validar el peso. Retire el envase y espere la recuperación automática."
             )
         elif "actuador" in texto or "mecanismo" in texto or "timeout" in texto:
             self.lbl_estado.setText("ERROR DE MECANISMO")
