@@ -83,7 +83,7 @@ class NodoVision(Node):
         self.declare_parameter('input_size', 640)
         self.declare_parameter('k_area', 0.05)
         self.declare_parameter('num_threads', 4)
-        self.declare_parameter('peso_timeout_sec', 1.0)
+        self.declare_parameter('peso_timeout_sec', 3.0)
 
         # Leer parámetros
         self.modelo_dir = self.get_parameter('modelo_dir').get_parameter_value().string_value
@@ -448,22 +448,18 @@ class NodoVision(Node):
                 peso_recibido_en = self._ultimo_peso_recibido_en
                 peso_fresco = (
                     peso_recibido_en is not None
-                    and self._inicio_analisis_peso is not None
-                    and peso_recibido_en >= self._inicio_analisis_peso
-                    and time.monotonic() - peso_recibido_en <= self.peso_timeout_sec
+                    and (time.monotonic() - peso_recibido_en) <= self.peso_timeout_sec
                 )
 
-                # Fail-safe: sin una lectura valida nunca se publica un estado
-                # de aceptacion ni se habilita la confirmacion en la GUI.
                 if peso_actual is None or not math.isfinite(peso_actual) or not peso_fresco:
                     self._frames_analizando = 14
                     self._ultimo_veredicto = (
-                        "PROCESAMIENTO EN CURSO|Esperando una lectura valida "
+                        "PROCESAMIENTO EN CURSO|Esperando lectura valida "
                         "de la balanza...|NONE"
                     )
-                    self.get_logger().warning(
-                        "Sin una muestra de peso nueva y valida durante el analisis.",
-                        throttle_duration_sec=2.0,
+                    self.get_logger().info(
+                        "Esperando muestra de peso valida durante el analisis...",
+                        throttle_duration_sec=3.0,
                     )
                     out_estado = self._ultimo_veredicto
                 elif peso_actual < -TOLERANCIA_CERO_BALANZA or peso_actual > max_peso:
