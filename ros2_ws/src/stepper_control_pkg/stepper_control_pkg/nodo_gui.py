@@ -201,6 +201,13 @@ class VentanaPrincipal(QMainWindow):
         self._timer_exito.setInterval(2000)
         self._timer_exito.timeout.connect(self._reset_ui)
 
+        self._timer_calibracion = QTimer(self)
+        self._timer_calibracion.setSingleShot(True)
+        self._timer_calibracion.setInterval(5000)
+        self._timer_calibracion.timeout.connect(self._reset_ui)
+
+        self._en_calibracion: bool = False
+
         self.senal_frame_raw.connect(self._actualizar_raw)
         self.senal_frame_seg.connect(self._actualizar_seg)
         self.senal_estado.connect(self._actualizar_estado)
@@ -296,7 +303,9 @@ class VentanaPrincipal(QMainWindow):
         """
         self._timer_error.stop()
         self._timer_exito.stop()
+        self._timer_calibracion.stop()
         self._ultimo_estado = ""
+        self._en_calibracion = False
         banner_bg = "#808080"
         inferior_color = "#808080"
 
@@ -337,6 +346,8 @@ class VentanaPrincipal(QMainWindow):
             "sistema disponible" in texto
             or "esperando envase" in texto
             or "esperando elemento" in texto
+            or "calibracion_lista" in texto
+            or "calibracion lista" in texto
         )
 
     @staticmethod
@@ -401,14 +412,43 @@ class VentanaPrincipal(QMainWindow):
             self._timer_error.start()
 
     def _actualizar_estado(self, estado: str) -> None:
-        # Durante la pantalla roja se descartan incluso mensajes validos de la
-        # camara. Asi ningun estado tardio puede repintar la interfaz en verde.
+        # Durante bloqueo de error o calibracion se descartan mensajes transitorios
+        # de la camara para evitar parpadeos visuales.
         if self.bloqueo_error:
-            if self._error_peso_persistente and self._es_estado_rearme(estado):
+            if (self._error_peso_persistente or self._en_calibracion) and self._es_estado_rearme(estado):
                 self._reset_ui()
             return
 
         if self._ultimo_estado == estado:
+            return
+
+        texto = estado.lower()
+
+        if "calibran" in texto:
+            self._timer_exito.stop()
+            self._timer_error.stop()
+            self._timer_calibracion.start()
+            self.bloqueo_error = True
+            self._en_calibracion = True
+            self._ultimo_estado = estado
+
+            color_calibracion = "#CA8A04"
+            self.frame_principal.setStyleSheet("")
+            self.frame_principal.setStyleSheet(ESTILO_FRAME_NEUTRO)
+
+            self.lbl_banner.setStyleSheet(
+                f"font-size: 24px; font-weight: bold; color: #FFFFFF; "
+                f"background-color: {color_calibracion}; padding: 10px;"
+            )
+            self.lbl_veredicto_inferior.setStyleSheet(
+                f"font-size: 20pt; font-weight: bold; color: {color_calibracion};"
+            )
+            self.lbl_estado.setText("RECALIBRANDO SISTEMA")
+            self.lbl_instruccion.setText("Por favor, espere unos segundos.\nNo inserte envases.")
+
+            self.btn_confirmar.setVisible(False)
+            self.btn_confirmar.setEnabled(False)
+            self.btn_confirmar.setStyleSheet(self._estilo_btn_inactivo)
             return
 
         es_exito = "reciclaje_exitoso" in estado.casefold()
@@ -423,10 +463,6 @@ class VentanaPrincipal(QMainWindow):
         
         self.btn_confirmar.setEnabled(False)
         self.btn_confirmar.setStyleSheet(self._estilo_btn_inactivo)
-        self.btn_confirmar.setVisible(False)
-        
-        texto = estado.lower()
-
         # Parseo de mensajes estructurados o directos de backend
         if "reciclaje_exitoso" in texto:
             banner_txt = "RECICLAJE COMPLETADO"

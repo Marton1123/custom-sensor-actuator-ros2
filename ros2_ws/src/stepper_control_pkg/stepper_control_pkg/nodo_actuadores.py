@@ -320,6 +320,10 @@ class NodoActuadores(Node):
         if abs(promedio) <= TOLERANCIA_CERO_BALANZA:
             return peso
 
+        # Notificar a la interfaz de usuario el inicio del proceso de calibracion
+        self._pub_estado.publish(
+            String(data="CALIBRANDO_BALANZA|Recalibrando sistema...\nPor favor, espere unos segundos.\nNo inserte envases.|NONE")
+        )
         offset_anterior = self.balanza.offset
         self.balanza.tare(5)
         peso_corregido = self.balanza.get_units(2)
@@ -328,6 +332,10 @@ class NodoActuadores(Node):
             f"Auto-tara por confirmacion visual completada: promedio previo={promedio:.2f}g, "
             f"offset {offset_anterior:.1f} -> {self.balanza.offset:.1f}, "
             f"peso corregido={peso_corregido:.2f}g."
+        )
+        # Notificar finalizacion de la calibracion para restablecer la pantalla
+        self._pub_estado.publish(
+            String(data="SISTEMA DISPONIBLE|Esperando envase...\nInserte una lata o botella en el centro.|NONE")
         )
         return peso_corregido
 
