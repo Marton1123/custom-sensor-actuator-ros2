@@ -38,7 +38,8 @@ from std_msgs.msg import Bool, Float32, String
 # Calibracion empirica de celda de carga HX711
 DEFAULT_HX711_SCALE: float = 2039.0          # Factor ADC -> gramos
 
-# Umbrales maximos de peso de seguridad (Gramos)
+# Umbrales de peso de seguridad (Gramos)
+DEFAULT_PESO_MIN_VALIDO: float = -35.0        # Margen para absorber drift mecanico normal
 DEFAULT_PESO_MAX_LATA: float = 30.0
 DEFAULT_PESO_MAX_BOTELLA: float = 65.0
 TOLERANCIA_CERO_BALANZA: float = 2.0
@@ -324,6 +325,9 @@ class NodoActuadores(Node):
         self._pub_estado.publish(
             String(data="CALIBRANDO_BALANZA|Recalibrando sistema...\nPor favor, espere unos segundos.\nNo inserte envases.|NONE")
         )
+        # Pausa fisica para asentar vibraciones mecanicas y permitir lectura en GUI
+        time.sleep(2.5)
+
         offset_anterior = self.balanza.offset
         self.balanza.tare(5)
         peso_corregido = self.balanza.get_units(2)
@@ -459,10 +463,10 @@ class NodoActuadores(Node):
 
         if (
             not math.isfinite(peso_actual)
-            or peso_actual < -TOLERANCIA_CERO_BALANZA
+            or peso_actual < DEFAULT_PESO_MIN_VALIDO
         ):
             self.get_logger().error(
-                f"Lectura de balanza invalida: {peso_actual:.2f}g. "
+                f"Lectura de balanza fuera de rango critico: {peso_actual:.2f}g (< {DEFAULT_PESO_MIN_VALIDO}g). "
                 "Se requiere recuperar el cero antes de mover motores."
             )
             self._pub_estado.publish(String(data="ERROR_BALANZA"))
