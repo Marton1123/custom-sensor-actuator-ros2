@@ -324,17 +324,19 @@ class NodoVision(Node):
                 time.sleep(0.01)
                 continue
 
-            img_h, img_w = frame.shape[:2]
+            frame_clean = np.ascontiguousarray(frame.copy())
+            img_h, img_w = frame_clean.shape[:2]
             scale = min(self.input_size / img_w, self.input_size / img_h)
             new_w = int(img_w * scale)
             new_h = int(img_h * scale)
             pad_w = (self.input_size - new_w) // 2
             pad_h = (self.input_size - new_h) // 2
 
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_rgb = cv2.cvtColor(frame_clean, cv2.COLOR_BGR2RGB)
             resized_img = cv2.resize(frame_rgb, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
             canvas = np.full((self.input_size, self.input_size, 3), 114, dtype=np.uint8)
             canvas[pad_h:pad_h+new_h, pad_w:pad_w+new_w] = resized_img
+            canvas = np.ascontiguousarray(canvas)
 
             mat_in = ncnn.Mat.from_pixels(canvas, ncnn.Mat.PixelType.PIXEL_RGB, self.input_size, self.input_size)
             mat_in.substract_mean_normalize([0.0, 0.0, 0.0], [1/255.0, 1/255.0, 1/255.0])
@@ -362,12 +364,12 @@ class NodoVision(Node):
 
     def image_callback(self, msg):
         try:
-            img = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            raw_bgr = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except Exception:
             return
 
-        img_h, img_w = img.shape[:2]
-        out_raw = img.copy()
+        img_h, img_w = raw_bgr.shape[:2]
+        out_raw = raw_bgr.copy()
         out_seg = np.zeros((img_h, img_w, 3), dtype=np.uint8)
         out_estado = self._ultimo_veredicto
         out_area = 0.0
@@ -377,7 +379,7 @@ class NodoVision(Node):
         
         with self._inference_lock:
             if self._estado_actual in ['BUSQUEDA', 'ESPERA_RETIRO', 'RECHAZO_PESO'] and self._frame_for_inference is None:
-                self._frame_for_inference = img.copy()
+                self._frame_for_inference = raw_bgr.copy()
             best_obj = self._latest_inference["best_obj"]
             best_score = self._latest_inference["best_score"]
             best_box = self._latest_inference["best_box"]
@@ -409,7 +411,7 @@ class NodoVision(Node):
                 cv2.putText(out_raw, f"{best_obj.upper()} {best_score:.2f}", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             
             if self._frames_botella >= 15:
-                self._frame_congelado = img.copy()
+                self._frame_congelado = raw_bgr.copy()
                 self._id_congelado = best_obj
                 self._box_congelado = best_box
                 self._estado_actual = 'ANALIZANDO'
