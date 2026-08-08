@@ -83,9 +83,12 @@ def generate_launch_description() -> LaunchDescription:
         name="nodo_vision",
         output="screen",
         emulate_tty=True,
-        parameters=[{
-            "modelo_dir": os.path.expanduser('~/custom-sensor-actuator-ros2/IA/models/botellas_vs_latas_ncnn')
-        }]
+        parameters=[
+            config_path,
+            {
+                "modelo_dir": os.path.expanduser('~/custom-sensor-actuator-ros2/IA/models/botellas_vs_latas_ncnn')
+            }
+        ]
     )
 
     return LaunchDescription([

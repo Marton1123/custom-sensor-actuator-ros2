@@ -15,3 +15,10 @@ nodo_camara:
 nodo_actuadores:
   ros__parameters:
     tiempo_motor: 3.8
+
+nodo_vision:
+  ros__parameters:
+    roi_x: 0
+    roi_y: 0
+    roi_w: 480
+    roi_h: 640

@@ -84,6 +84,10 @@ class NodoVision(Node):
         self.declare_parameter('k_area', 0.05)
         self.declare_parameter('num_threads', 4)
         self.declare_parameter('peso_timeout_sec', 3.0)
+        self.declare_parameter('roi_x', 100)
+        self.declare_parameter('roi_y', 0)
+        self.declare_parameter('roi_w', 380)
+        self.declare_parameter('roi_h', 640)
 
         # Leer parámetros
         self.modelo_dir = self.get_parameter('modelo_dir').get_parameter_value().string_value
@@ -93,8 +97,15 @@ class NodoVision(Node):
         self.k_area = self.get_parameter('k_area').get_parameter_value().double_value
         self.num_threads = self.get_parameter('num_threads').get_parameter_value().integer_value
         self.peso_timeout_sec = self.get_parameter('peso_timeout_sec').get_parameter_value().double_value
+        self.roi_x = self.get_parameter('roi_x').get_parameter_value().integer_value
+        self.roi_y = self.get_parameter('roi_y').get_parameter_value().integer_value
+        self.roi_w = self.get_parameter('roi_w').get_parameter_value().integer_value
+        self.roi_h = self.get_parameter('roi_h').get_parameter_value().integer_value
+
+        self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
         self.get_logger().info(f"Cargando modelo NCNN desde: {self.modelo_dir}")
+        self.get_logger().info(f"ROI configurado: x={self.roi_x}, y={self.roi_y}, w={self.roi_w}, h={self.roi_h}")
         
         self.classes = {0: "bottle", 1: "can"}
         
@@ -326,14 +337,32 @@ class NodoVision(Node):
 
             frame_clean = np.ascontiguousarray(frame.copy())
             img_h, img_w = frame_clean.shape[:2]
-            scale = min(self.input_size / img_w, self.input_size / img_h)
-            new_w = int(img_w * scale)
-            new_h = int(img_h * scale)
+
+            rx = max(0, min(self.roi_x, img_w - 1))
+            ry = max(0, min(self.roi_y, img_h - 1))
+            rw = self.roi_w if self.roi_w > 0 else img_w
+            rh = self.roi_h if self.roi_h > 0 else img_h
+            rw = max(1, min(rw, img_w - rx))
+            rh = max(1, min(rh, img_h - ry))
+
+            # A) Recorte de ROI
+            roi_bgr = frame_clean[ry:ry+rh, rx:rx+rw]
+
+            # B) Ecualización de Color Segura (CLAHE sobre canal L en espacio LAB)
+            roi_lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
+            l_chan, a_chan, b_chan = cv2.split(roi_lab)
+            l_eq = self._clahe.apply(l_chan)
+            lab_eq = cv2.merge((l_eq, a_chan, b_chan))
+            roi_rgb = cv2.cvtColor(lab_eq, cv2.COLOR_LAB2RGB)
+
+            # C) Redimensionamiento e inferencia
+            scale = min(self.input_size / rw, self.input_size / rh)
+            new_w = int(rw * scale)
+            new_h = int(rh * scale)
             pad_w = (self.input_size - new_w) // 2
             pad_h = (self.input_size - new_h) // 2
 
-            frame_rgb = cv2.cvtColor(frame_clean, cv2.COLOR_BGR2RGB)
-            resized_img = cv2.resize(frame_rgb, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            resized_img = cv2.resize(roi_rgb, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
             canvas = np.full((self.input_size, self.input_size, 3), 114, dtype=np.uint8)
             canvas[pad_h:pad_h+new_h, pad_w:pad_w+new_w] = resized_img
             canvas = np.ascontiguousarray(canvas)
@@ -351,13 +380,19 @@ class NodoVision(Node):
 
             if ret == 0:
                 raw_output = np.array(mat_out)
-                boxes, scores, class_ids = self.decode_yolov8(raw_output, img_w, img_h, scale, scale, pad_w, pad_h)
+                boxes, scores, class_ids = self.decode_yolov8(raw_output, rw, rh, scale, scale, pad_w, pad_h)
                 if len(scores) > 0:
                     best_idx = np.argmax(scores)
                     best_score = scores[best_idx]
                     cls_num = class_ids[best_idx]
                     best_obj = self.classes.get(cls_num, "desconocido")
-                    best_box = boxes[best_idx]
+                    r_box = boxes[best_idx]
+                    # Ajustar coordenadas al marco global de la imagen completa
+                    gx1 = np.clip(r_box[0] + rx, 0, img_w)
+                    gy1 = np.clip(r_box[1] + ry, 0, img_h)
+                    gx2 = np.clip(r_box[2] + rx, 0, img_w)
+                    gy2 = np.clip(r_box[3] + ry, 0, img_h)
+                    best_box = [gx1, gy1, gx2, gy2]
             
             with self._inference_lock:
                 self._latest_inference = {"best_obj": best_obj, "best_score": best_score, "best_box": best_box}
@@ -375,7 +410,16 @@ class NodoVision(Node):
         out_area = 0.0
         pala_vacia_visual = False
 
-        scale = min(self.input_size / img_w, self.input_size / img_h)
+        rx = max(0, min(self.roi_x, img_w - 1))
+        ry = max(0, min(self.roi_y, img_h - 1))
+        rw = self.roi_w if self.roi_w > 0 else img_w
+        rh = self.roi_h if self.roi_h > 0 else img_h
+        rw = max(1, min(rw, img_w - rx))
+        rh = max(1, min(rh, img_h - ry))
+
+        # Dibujar Zona de Análisis (ROI) en out_raw en color cyan (BGR: 255, 255, 0)
+        cv2.rectangle(out_raw, (rx, ry), (rx + rw, ry + rh), (255, 255, 0), 1)
+        cv2.putText(out_raw, "Zona de Analisis", (rx + 5, max(15, ry + 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
         
         with self._inference_lock:
             if self._estado_actual in ['BUSQUEDA', 'ESPERA_RETIRO', 'RECHAZO_PESO'] and self._frame_for_inference is None:
