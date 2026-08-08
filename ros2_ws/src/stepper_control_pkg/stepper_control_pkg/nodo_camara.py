@@ -161,11 +161,16 @@ class NodoCamara(Node):
                         frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
 
                     if self.redimensionar:
+                        if self.rotar_90_horario:
+                            target_size = (self.alto_objetivo, self.ancho_objetivo)
+                        else:
+                            target_size = (self.ancho_objetivo, self.alto_objetivo)
+
                         alto_act, ancho_act = frame.shape[:2]
-                        if ancho_act != self.ancho_objetivo or alto_act != self.alto_objetivo:
+                        if (ancho_act, alto_act) != target_size:
                             frame = cv2.resize(
                                 frame,
-                                (self.ancho_objetivo, self.alto_objetivo),
+                                target_size,
                                 interpolation=cv2.INTER_LINEAR,
                             )
 
