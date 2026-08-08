@@ -21,4 +21,4 @@ nodo_vision:
     roi_x: 120
     roi_y: 160
     roi_w: 240
-    roi_h: 320
+    roi_h: 380
