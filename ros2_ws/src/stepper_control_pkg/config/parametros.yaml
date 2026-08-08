@@ -18,7 +18,7 @@ nodo_actuadores:
 
 nodo_vision:
   ros__parameters:
-    roi_x: 80
+    roi_x: 120
     roi_y: 160
-    roi_w: 320
-    roi_h: 380
+    roi_w: 240
+    roi_h: 320
