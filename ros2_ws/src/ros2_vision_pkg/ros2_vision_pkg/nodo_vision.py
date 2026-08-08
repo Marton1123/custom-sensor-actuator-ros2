@@ -417,10 +417,6 @@ class NodoVision(Node):
         rw = max(1, min(rw, img_w - rx))
         rh = max(1, min(rh, img_h - ry))
 
-        # Dibujar Zona de Análisis (ROI) en out_raw en color cyan (BGR: 255, 255, 0)
-        cv2.rectangle(out_raw, (rx, ry), (rx + rw, ry + rh), (255, 255, 0), 1)
-        cv2.putText(out_raw, "Zona de Analisis", (rx + 5, max(15, ry + 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-        
         with self._inference_lock:
             if self._estado_actual in ['BUSQUEDA', 'ESPERA_RETIRO', 'RECHAZO_PESO'] and self._frame_for_inference is None:
                 self._frame_for_inference = raw_bgr.copy()
@@ -643,6 +639,12 @@ class NodoVision(Node):
         # SPoP - Single Point of Publication
         # ----------------------------------------------------
         self._publicar_pala_vacia_visual(pala_vacia_visual)
+
+        # Dibujar Zona de Análisis (ROI) sobre out_raw
+        cv2.rectangle(out_raw, (rx, ry), (rx + rw, ry + rh), (255, 255, 0), 2)
+        tag_y = max(20, ry)
+        cv2.rectangle(out_raw, (rx, tag_y - 20), (rx + 160, tag_y), (0, 0, 0), -1)
+        cv2.putText(out_raw, "Zona de Analisis", (rx + 5, tag_y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
 
         out_raw_rgb = cv2.cvtColor(out_raw, cv2.COLOR_BGR2RGB)
         out_seg_rgb = cv2.cvtColor(out_seg, cv2.COLOR_BGR2RGB)
