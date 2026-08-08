@@ -4,6 +4,12 @@ nodo_balanza:
 
 nodo_camara:
   ros__parameters:
+    device_index: 0
+    recortar_ojo_izquierdo: true
+    redimensionar: true
+    ancho_objetivo: 640
+    alto_objetivo: 480
+    rotar_90_horario: true
     distancia_camara_cm: 60.0
 
 nodo_actuadores:
