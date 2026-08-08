@@ -114,10 +114,7 @@ class NodoVision(Node):
         self._ultimo_estado_publicado = ""
         self._tiempo_retiro = None
         
-        # Pre-allocate canvas
-        self._canvas_espera = np.zeros((480, 640, 3), dtype=np.uint8)
-        self._canvas_analizando = np.zeros((480, 640, 3), dtype=np.uint8)
-        self._frozen_seg_img = np.zeros((480, 640, 3), dtype=np.uint8)
+        self._frozen_seg_img = None
         
         # NCNN init
         self.net = ncnn.Net()
@@ -334,11 +331,12 @@ class NodoVision(Node):
             pad_w = (self.input_size - new_w) // 2
             pad_h = (self.input_size - new_h) // 2
 
-            resized_img = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            resized_img = cv2.resize(frame_rgb, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
             canvas = np.full((self.input_size, self.input_size, 3), 114, dtype=np.uint8)
             canvas[pad_h:pad_h+new_h, pad_w:pad_w+new_w] = resized_img
 
-            mat_in = ncnn.Mat.from_pixels(canvas, ncnn.Mat.PixelType.PIXEL_BGR2RGB, self.input_size, self.input_size)
+            mat_in = ncnn.Mat.from_pixels(canvas, ncnn.Mat.PixelType.PIXEL_RGB, self.input_size, self.input_size)
             mat_in.substract_mean_normalize([0.0, 0.0, 0.0], [1/255.0, 1/255.0, 1/255.0])
 
             ex = self.net.create_extractor()
@@ -370,7 +368,7 @@ class NodoVision(Node):
 
         img_h, img_w = img.shape[:2]
         out_raw = img.copy()
-        out_seg = self._canvas_espera.copy()
+        out_seg = np.zeros((img_h, img_w, 3), dtype=np.uint8)
         out_estado = self._ultimo_veredicto
         out_area = 0.0
         pala_vacia_visual = False
@@ -428,7 +426,6 @@ class NodoVision(Node):
             cv2.putText(out_raw, f"ANALIZANDO {clase_str}...", (bx1, max(0, by1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (0, 255, 255), 2)
             
-            out_seg = self._canvas_analizando.copy()
             out_estado = self._ultimo_veredicto
 
             if self._frames_analizando >= 15:
@@ -484,15 +481,15 @@ class NodoVision(Node):
                         text1 = f"{clase_str} RECHAZADA"
                         text2 = f"EXCESO DE PESO: {peso_actual:.1f}g"
                     
-                    self._frozen_seg_img = np.zeros((480, 640, 3), dtype=np.uint8)
+                    self._frozen_seg_img = np.zeros((img_h, img_w, 3), dtype=np.uint8)
                     self._frozen_seg_img[:] = (0, 0, 180)
                     ts1 = cv2.getTextSize(text1, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)[0]
-                    tx1 = (640 - ts1[0]) // 2
-                    ty1 = (480 + ts1[1]) // 2 - 25
+                    tx1 = (img_w - ts1[0]) // 2
+                    ty1 = (img_h + ts1[1]) // 2 - 25
                     cv2.putText(self._frozen_seg_img, text1, (tx1, ty1), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
                     
                     ts2 = cv2.getTextSize(text2, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
-                    tx2 = (640 - ts2[0]) // 2
+                    tx2 = (img_w - ts2[0]) // 2
                     cv2.putText(self._frozen_seg_img, text2, (tx2, ty1 + 45), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 else:
                     self._estado_actual = 'ESPERA_CONFIRMACION'
@@ -500,11 +497,11 @@ class NodoVision(Node):
                     self._ultimo_veredicto = f"PROCESAMIENTO EN CURSO|{clase_str} ACEPTADA\n\nPresione CONFIRMAR para procesar.|CONFIRMAR Y GIRAR"
                     self._grado_a_publicar = angulo
 
-                    self._frozen_seg_img = np.zeros((480, 640, 3), dtype=np.uint8)
+                    self._frozen_seg_img = np.zeros((img_h, img_w, 3), dtype=np.uint8)
                     self._frozen_seg_img[:] = (0, 150, 0)
                     text_size = cv2.getTextSize(f"{clase_str} ACEPTADA", cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3)[0]
-                    text_x = (640 - text_size[0]) // 2
-                    text_y = (480 + text_size[1]) // 2
+                    text_x = (img_w - text_size[0]) // 2
+                    text_y = (img_h + text_size[1]) // 2
                     cv2.putText(self._frozen_seg_img, f"{clase_str} ACEPTADA", (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
                 
                 out_estado = self._ultimo_veredicto
@@ -513,7 +510,7 @@ class NodoVision(Node):
         elif self._estado_actual == 'RECHAZO_PESO':
             out_raw = self._frame_congelado.copy()
             out_estado = self._ultimo_veredicto
-            out_seg = self._frozen_seg_img.copy()
+            out_seg = self._frozen_seg_img.copy() if self._frozen_seg_img is not None else np.zeros((img_h, img_w, 3), dtype=np.uint8)
 
             bx1, by1, bx2, by2 = map(int, self._box_congelado)
             cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (0, 0, 255), 2)
@@ -540,7 +537,7 @@ class NodoVision(Node):
         elif self._estado_actual == 'ESPERA_CONFIRMACION':
             out_raw = self._frame_congelado.copy()
             out_estado = self._ultimo_veredicto
-            out_seg = self._frozen_seg_img.copy()
+            out_seg = self._frozen_seg_img.copy() if self._frozen_seg_img is not None else np.zeros((img_h, img_w, 3), dtype=np.uint8)
 
             bx1, by1, bx2, by2 = map(int, self._box_congelado)
             cv2.rectangle(out_raw, (bx1, by1), (bx2, by2), (0, 255, 255), 2)
@@ -557,7 +554,7 @@ class NodoVision(Node):
                 self._confirmacion_recibida = False
 
         elif self._estado_actual == 'ESPERA_RETIRO':
-            out_seg = self._frozen_seg_img.copy()
+            out_seg = self._frozen_seg_img.copy() if self._frozen_seg_img is not None else np.zeros((img_h, img_w, 3), dtype=np.uint8)
             out_estado = self._ultimo_veredicto
             
             if best_obj in ["bottle", "can"] and best_score > 0.40:
