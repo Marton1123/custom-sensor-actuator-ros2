@@ -476,11 +476,11 @@ class NodoVision(Node):
 
                 if self._id_congelado == "can":
                     clase_str = "LATA"
-                    max_peso = 30.0
+                    max_peso = 20.0
                     angulo = -90.0
                 else:
                     clase_str = "BOTELLA"
-                    max_peso = 65.0
+                    max_peso = 31.0
                     angulo = 90.0
 
                 peso_actual = self._ultimo_peso
